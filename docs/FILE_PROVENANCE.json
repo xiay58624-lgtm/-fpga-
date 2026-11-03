@@ -6252,7 +6252,8 @@
     "source_sha256": "e454b4afca770ce84a591ea97534aae28af389da08f8d5ddb68e9a5b7c5c33e5",
     "delivered_sha256": "e454b4afca770ce84a591ea97534aae28af389da08f8d5ddb68e9a5b7c5c33e5",
     "modified_for_delivery": false,
-    "note": ""
+    "note": "Reconstruct with python tools/restore_models.py; complete SHA-256 verified against original.",
+    "delivery_parts": "rk3568/app/model/traffic_rk3568_fp16.rknn.parts/manifest.json"
   },
   {
     "path": "rk3568/app/model/nav_video7_v4_rk3568_w8a8.rknn",

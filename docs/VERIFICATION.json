@@ -1,7 +1,8 @@
 {
-  "checked_at": "2026-11-03T08:53:30.153764+00:00",
+  "checked_at": "2026-11-03T10:02:57.528399+00:00",
   "node_for_tests": "v24.22.1",
   "source_manifest_hashes_verified": 705,
+  "traffic_model_part_reassembly_sha256_verified": true,
   "javascript_syntax": [
     {
       "path": "upper_computer/adas-communication.js",
@@ -84,7 +85,7 @@
     "tests/PlateTextValidationTests.cpp"
   ],
   "rk_board_connection": {
-    "checked_at": "2026-11-03T08:52:44.888502+00:00",
+    "checked_at": "2026-11-03T09:48:15.249281+00:00",
     "connected": false,
     "error": "TimeoutError"
   },

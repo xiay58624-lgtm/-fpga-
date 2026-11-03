@@ -7,6 +7,8 @@ BackendClient.cpp 已包含 15000 ms 默认 HTTP 超时；RoadInferenceWorker.cp
 
 ## 模型
 
+从仓库/源码包根目录执行 `python tools/restore_models.py`，先还原分片交付的红绿灯 RKNN；脚本校验所有分片及最终 SHA-256。其他模型无需合并。
+
 ADAS 三个模型由 model_manifest_adas.json 记录文件、类别顺序和输出约定，本次已核对本地文件哈希。
 导航模型采用 `_board_deploy_fp16.py` 指向的 FP16 新导出文件，部署名保留 `nav_video7_v4_rk3568_w8a8.rknn`；这个历史文件名不代表它是 INT8。本次未核实其与板端当前文件一致。
 原始早期 W8A8 文件没有混入此交付。不要因文件名相同而忽略精度和输出属性。

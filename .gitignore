@@ -14,3 +14,4 @@ DATALOG/
 build/
 *.zip
 *.tar.gz
+/rk3568/app/model/traffic_rk3568_fp16.rknn
