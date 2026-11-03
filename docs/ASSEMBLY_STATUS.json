@@ -1,0 +1,9 @@
+{
+  "assembled_at": "2026-11-03T08:47:16.762377+00:00",
+  "files": 705,
+  "known_secret_value_scan": "passed",
+  "live_cloud_files": 73,
+  "board_live_verified": false,
+  "fpga_flashed_image_verified": false,
+  "car_firmware_readback_verified": false
+}

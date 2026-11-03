@@ -1,0 +1,58 @@
+#ifndef APISERVER_H
+#define APISERVER_H
+
+#include <QObject>
+#include <QTcpServer>
+#include <QHostAddress>
+#include <QNetworkAccessManager>
+
+class BackendClient;
+class BusinessDialog;
+class QTcpSocket;
+class UserMessageConfig;
+class VehicleClient;
+class CaptureThread;
+
+class ApiServer : public QObject {
+    Q_OBJECT
+public:
+    explicit ApiServer(BackendClient *backendClient,
+                       BusinessDialog *businessDialog,
+                       UserMessageConfig *userMessageConfig = nullptr,
+                       VehicleClient *vehicleClient = nullptr,
+                       CaptureThread *captureThread = nullptr,
+                       QObject *parent = nullptr);
+
+    bool listen(quint16 port, const QHostAddress &addr = QHostAddress::Any);
+    quint16 port() const { return m_port; }
+    QString lastPeerIp() const { return m_lastPeerIp; }
+    bool isListening() const;
+    QString serverAddress() const;
+    QString errorString() const;
+
+signals:
+    void peerDiscovered(QString ip);
+    void userMessageConfigChanged();
+
+private:
+    void onNewConn();
+    void handleSocket(QTcpSocket *s);
+    void replyJson(QTcpSocket *s, int code, const QByteArray &json);
+    void replyText(QTcpSocket *s, int code, const QByteArray &text, const QByteArray &ct = "text/plain; charset=utf-8");
+    void replyBinary(QTcpSocket *s, int code, const QByteArray &body,
+                     const QByteArray &ct,
+                     const QByteArray &extraHeaders = QByteArray());
+
+    QTcpServer m_srv;
+    BackendClient *m_backendClient = nullptr;
+    BusinessDialog *m_businessDialog = nullptr;
+    UserMessageConfig *m_userMessageConfig = nullptr;
+    VehicleClient *m_vehicleClient = nullptr;
+    CaptureThread *m_captureThread = nullptr;
+    quint16 m_port = 0;
+    QString m_lastPeerIp;
+    QNetworkAccessManager m_nam;
+};
+
+#endif
+

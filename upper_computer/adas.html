@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>嵌赛 · ADAS 驾驶感知工作台</title>
+  <link rel="stylesheet" href="./adas.css?v=20261027vision1">
+  <script defer src="./adas-policy.js?v=20261018d"></script><script defer src="./adas-fusion.js?v=20261022fusion2"></script><script defer src="./adas.js?v=20261103comm2"></script>
+  <link rel="stylesheet" href="./adas-detections.css?v=20261027demo2">
+  <script defer src="./adas-detections.js?v=20261027demo3"></script>
+  <link rel="stylesheet" href="./adas-deployment.css?v=20261031car6">
+  <script defer src="./adas-deployment.js?v=20261031car6"></script>
+  <script type="module" src="./adas-deployment-3d.js?v=20261031car6"></script>
+  <link rel="stylesheet" href="./adas-communication.css?v=20261103comm2">
+  <script defer src="./adas-communication.js?v=20261103comm2"></script>
+</head>
+<body>
+  <header class="topbar">
+  <a class="brand" href="./adas.html"><span class="brand-mark" aria-label="方向盘图标"><span class="wheel-icon" aria-hidden="true"></span></span><span>驾驶感知工作台<small>2026 嵌赛 · 紫光同创 FPGA 创新设计 · 选题三</small></span></a>
+    <div class="top-actions"><span id="connection" class="pill"><i></i> 本地联调</span><time id="clock"></time><button id="fullscreen" title="进入全屏">⛶ 全屏演示</button></div>
+  </header>
+  <div class="workspace">
+    <aside class="sidebar">
+      <div class="eyebrow">ADAS / 场景实验室</div>
+      <h1>感知道路，<br><span>看见决策。</span></h1>
+      <nav aria-label="测试场景">
+        <button class="page-link active" data-page="performance"><span>01</span><b>传输性能</b></button>
+        <button class="page-link" data-page="single-test"><span>02</span><b>单一驾驶行为</b></button>
+        <button class="page-link" data-page="sim-test"><span>03</span><b>模拟智驾功能</b></button>
+        <button class="page-link" data-page="fusion"><span>04</span><b>视频融合</b></button>
+        <button class="page-link" data-page="detections"><span>05</span><b>检测结果</b></button>
+        <button class="page-link" data-page="deployment"><span>06</span><b>部署拓扑</b></button>
+        <button class="page-link" data-page="communication"><span>07</span><b>实时通信</b></button>
+      </nav>
+      <div class="architecture"><span>紫光同创 FPGA</span><span>ARM ≤ RK3568</span><span>LCD / HDMI · 上位机</span></div>
+    </aside>
+    <main>
+      <section id="terminalPanel" class="panel terminal-panel" aria-label="终端节点连接状态">
+        <div class="panel-head"><div><h3>终端节点</h3><span>分别监看板端、无线小车与本机后端的连接状态</span></div><button id="refreshNodes" type="button">刷新状态</button></div>
+        <div class="terminal-grid">
+          <article class="terminal-node"><div class="terminal-node-head"><b>RK3568 · 字符遥测</b><span id="nodeRkState" class="node-state pending">等待遥测</span></div><p id="nodeRkDetail">等待 RK 上报检测与方向数据</p><button id="performanceWhepConnect" class="secondary" type="button" hidden>媒体接收已停用</button><details><summary>最近遥测信息</summary><div id="nodeRkInfo" class="node-info">等待 RK 字符消息</div></details></article>
+          <article class="terminal-node"><div class="terminal-node-head"><b>ESP32 小车</b><span id="nodeCarState" class="node-state pending">未连接</span></div><p id="nodeCarDetail">8266WifiCar · TCP 192.168.4.1:8888</p><details><summary>设备信息</summary><div id="nodeCarInfo" class="node-info">固件 TCP 握手状态</div></details></article>
+          <article class="terminal-node"><div class="terminal-node-head"><b>本机后端</b><span id="nodeBackendState" class="node-state pending">等待检测</span></div><p id="nodeBackendDetail">Node.js · 等待状态接口</p><details><summary>相关信息</summary><div id="nodeBackendInfo" class="node-info">等待状态接口</div></details></article>
+        </div>
+      </section>
+      <section class="panel rk-command-panel" aria-label="RK3568字符指令日志">
+        <div class="panel-head"><div><h3>RK3568 字符遥测</h3><span>接收检测、方向和控制状态字符，不接收视频或图片</span></div><div class="comm-shortcut"><button id="openCommunication" type="button">查看实时收发</button><span id="rkCommandState" class="tag">等待遥测</span></div></div>
+        <div id="rkCommandLog" class="rk-command-log" role="log" aria-live="polite"><div class="rk-command-empty">尚未收到 RK 字符指令</div></div>
+      </section>
+      <div id="dashboardPage" class="page-panel">
+      <section class="heading"><div><div class="eyebrow">PERCEPTION & DECISION</div><h2 id="sceneTitle">十字路口辅助驾驶</h2></div><div class="mode-switch" aria-label="数据来源"><button class="selected" data-mode="local">本地场景联调</button><button data-mode="live">板端状态监看</button></div></section>
+      <label class="mobile-scene">测试场景<select id="sceneSelect"><option value="路口信号灯">十字路口</option><option value="道路变道">车道变换</option><option value="行人/障碍物">行人避障</option><option value="夜间道路">导航 / 夜间</option></select></label>
+      <div class="source-note" id="sourceNote">决策输入来自手动联调。道路画面为示意图；导入素材后仅回放，不在浏览器内执行识别。</div>
+      <section class="metrics" aria-label="实测链路指标">
+        <div><span>输入有效源</span><strong id="sourceMetric">—<em> / 4</em></strong><small id="sourceDetail">等待板端实测</small></div>
+        <div><span>采集帧率</span><strong id="fpsMetric">—<em> FPS</em></strong><small>PCIe 实际收帧</small></div>
+        <div><span>处理周期耗时</span><strong id="latencyMetric">—<em> ms</em></strong><small>软件周期 · 非端到端硬件延迟</small></div>
+        <div><span>车辆速度 · 联调 / 板端</span><strong id="speedMetric">30<em> km/h</em></strong><small id="speedDetail">道路限速 40 km/h</small></div>
+      </section>
+      <div class="cockpit">
+        <section class="panel vision-panel">
+          <div class="panel-head"><div><h3>四向道路视野</h3><span>前 / 后 / 左 / 右 · 板端实时帧 / 素材回放</span></div><div class="camera-actions"><span id="cameraStreamState" class="pill" role="status">未连接</span><button id="cameraConnect" type="button">开始检测</button><button id="cameraDisconnect" type="button" disabled>停止检测</button><button id="resetView">四路视图</button></div></div>
+          <div class="camera-grid" id="cameraGrid">
+            <article class="camera" data-camera="0"><canvas aria-label="前向道路示意"></canvas><img alt="前向图片素材" hidden><video playsinline muted controls hidden></video><div class="camera-top"><span>01 · 前向 FRONT</span><button class="focus" aria-label="放大前向画面">⛶</button></div><div class="camera-bottom"><span class="media-name">联调示意 · 非采集画面</span><label class="import">导入素材<input type="file" accept="image/*,video/*"></label></div></article>
+            <article class="camera" data-camera="1"><canvas aria-label="后向道路示意"></canvas><img alt="后向图片素材" hidden><video playsinline muted controls hidden></video><div class="camera-top"><span>02 · 后向 REAR</span><button class="focus" aria-label="放大后向画面">⛶</button></div><div class="camera-bottom"><span class="media-name">联调示意 · 非采集画面</span><label class="import">导入素材<input type="file" accept="image/*,video/*"></label></div></article>
+            <article class="camera" data-camera="2"><canvas aria-label="左向道路示意"></canvas><img alt="左向图片素材" hidden><video playsinline muted controls hidden></video><div class="camera-top"><span>03 · 左向 LEFT</span><button class="focus" aria-label="放大左向画面">⛶</button></div><div class="camera-bottom"><span class="media-name">联调示意 · 非采集画面</span><label class="import">导入素材<input type="file" accept="image/*,video/*"></label></div></article>
+            <article class="camera" data-camera="3"><canvas aria-label="右向道路示意"></canvas><img alt="右向图片素材" hidden><video playsinline muted controls hidden></video><div class="camera-top"><span>04 · 右向 RIGHT</span><button class="focus" aria-label="放大右向画面">⛶</button></div><div class="camera-bottom"><span class="media-name">联调示意 · 非采集画面</span><label class="import">导入素材<input type="file" accept="image/*,video/*"></label></div></article>
+          </div>
+          <div class="vision-footer"><span id="mediaStatus">视频和图片接收已停用</span><button id="playMedia" type="button" hidden>播放全部视频</button><button id="clearMedia" type="button" hidden>清除素材</button></div>
+        </section>
+        <section class="panel decision-panel">
+          <div class="panel-head"><div><h3>联合驾驶决策</h3><span id="decisionSource">信号灯 · 车道 · 障碍物联合判断</span></div><span id="decisionPill" class="pill green">正常</span></div>
+          <div class="decision-summary"><span id="arrow">↑</span><div><strong id="action">直行</strong><p id="reason">绿灯通行，按所在车道规划方向</p></div></div>
+          <canvas id="birdView" aria-label="车辆、车道、变道和转弯决策的俯视路径示意图"></canvas>
+          <div class="signal-summary"><span id="trafficLight" class="light green"></span><b id="signalText">绿灯</b><span id="laneText">直行车道 · 虚线</span></div>
+          <div id="alarm" class="alarm" role="status">当前无报警</div>
+          <div class="execution-status" aria-live="polite"><div><span>执行判定</span><strong id="executionState">可执行</strong></div><p id="executionReason">当前场景规则允许执行规划动作</p></div>
+        </section>
+        <section class="panel controls-panel">
+          <div class="panel-head"><div><h3>驾驶台</h3><span>车道选择、变道指令和速度设定联合下发</span></div><button id="reset">重置</button></div>
+          <div class="recognition-strip" aria-label="实时道路情况识别">
+            <div class="recognition-title"><b>实时道路情况识别</b><small id="recognitionSource">等待 RK3568 YOLO 汇总</small></div>
+            <div class="recognition-grid">
+              <div><span>左转信号</span><strong id="signalLeft">未上报</strong><select id="localSignalLeft" class="local-road-input" aria-label="本地左转信号"><option>红灯</option><option>黄灯</option><option selected>绿灯</option><option>未知</option></select></div>
+              <div><span>直行信号</span><strong id="signalStraight">未上报</strong><select id="localSignalStraight" class="local-road-input" aria-label="本地直行信号"><option>红灯</option><option>黄灯</option><option selected>绿灯</option><option>未知</option></select></div>
+              <div><span>右转信号</span><strong id="signalRight">未上报</strong><select id="localSignalRight" class="local-road-input" aria-label="本地右转信号"><option>红灯</option><option>黄灯</option><option selected>绿灯</option><option>未知</option></select></div>
+              <div class="recognition-risk"><div><span>障碍物</span><strong id="obstacleState">未上报</strong><select id="consoleObstacle" class="local-road-input" aria-label="本地障碍物识别"><option value="无" selected>无</option><option value="有">有</option></select></div></div>
+              <div><span>左侧车道线</span><strong id="lineLeft">未上报</strong><select id="localLineLeft" class="local-road-input" aria-label="本地左侧车道线"><option>实线</option><option selected>虚线</option><option>未知</option></select></div>
+              <div><span>右侧车道线</span><strong id="lineRight">未上报</strong><select id="localLineRight" class="local-road-input" aria-label="本地右侧车道线"><option>实线</option><option selected>虚线</option><option>未知</option></select></div>
+              <div class="recognition-speed"><span>道路限速</span><strong id="recognizedSpeedLimit">未上报</strong><input id="consoleSpeedLimit" class="local-road-input" type="number" min="10" max="180" value="40" aria-label="本地道路限速"></div>
+            </div>
+          </div>
+          <div class="driver-console">
+            <section class="dock-window lane-window" data-dock="lane"><div class="dock-head"><b>当前车道</b><button class="float-dock" type="button" data-target="lane">浮动</button></div><div class="lane-buttons"><button type="button" data-lane="左车道">左转车道</button><button type="button" data-lane="直行车道" class="selected">直行车道</button><button type="button" data-lane="右车道">右转车道</button></div></section>
+            <section class="dock-window change-window" data-dock="change"><div class="dock-head"><b>变道操作</b><button class="float-dock" type="button" data-target="change">浮动</button></div><div class="change-buttons"><button type="button" data-change="左转向灯">向左变道</button><button type="button" data-change="关闭" class="selected">不变道</button><button type="button" data-change="右转向灯">向右变道</button></div></section>
+            <section class="dock-window drive-control" data-dock="drive"><div class="dock-head drive-control-head"><b>行驶控制</b><span id="driveControlState" hidden>待连接</span><button class="float-dock" type="button" data-target="drive">浮动</button></div><div class="drive-control-buttons"><button id="driveStart" type="button">行驶</button><button id="driveStop" type="button" class="stop-button">停车</button></div><label class="drive-speed-setting">车辆速度<input id="consoleSpeedNumber" type="number" min="0" max="180" value="30"></label></section>
+          </div>
+          <form id="controls" class="compat-controls" aria-hidden="true">
+            <label>所在车道<select name="lane"><option>左车道</option><option selected>直行车道</option><option>右车道</option></select></label><label>信号灯<select name="signal"><option>红灯</option><option selected>绿灯</option><option>黄灯</option><option>未知</option></select></label><label>车道线<select name="lane_marking"><option>虚线</option><option>实线</option><option>未知</option></select></label><label>导航方向<select name="maneuver"><option>左转</option><option selected>直行</option><option>右转</option><option>停车</option></select></label><label>转向灯<select name="turn_signal"><option selected>关闭</option><option>左转向灯</option><option>右转向灯</option></select></label>
+            <label>道路限速<input name="speed_limit_kmh" type="number" value="40" min="10" max="180" step="1"></label><input name="speed_kmh" type="hidden" value="30"><output id="speedValue" hidden>30 km/h</output><label><input type="checkbox" name="moving" checked>车辆正在行驶</label><label><input type="checkbox" name="obstacle">前方行人 / 障碍物风险</label>
+          </form>
+          <div class="driver-settings"><label class="force-check"><input id="consoleForce" name="forced_change" type="checkbox">强制执行</label></div>
+          <p class="control-hint" id="controlHint">↑ 关闭转向 · ← / → 转向<br>空格 行驶 / 停止 · X 强制变道</p>
+          <div id="liveSettings"><label>监看后端地址<input id="backendBase" type="url" placeholder="http://127.0.0.1:8080"></label><label>状态数据源<select id="dataSource"><option value="relay">公网云端 · 字符指令中继</option><option value="rk">局域网 RK3568 状态</option></select></label><label id="rkHostLabel">RK 板端地址<input id="rkHost" type="text" placeholder="192.168.100.105"></label><button id="connect">连接字符指令</button><small id="dataSourceHint">只轮询字符消息，不接收视频或图片；小车控制链路独立。</small></div>
+          <section class="car-test-panel" aria-label="ESP32小车手动联调测试台">
+            <div class="car-test-head"><div><b>ESP32 小车控制测试台</b><small>手动测试按钮独立于场景规则</small></div><div class="car-test-head-actions"><button id="autoExecute" type="button" aria-pressed="false">自动执行</button><span id="autoExecuteState" class="tag">关闭 · 手动发送</span><span id="carTestConnection" class="tag">未连接</span></div></div>
+            <div class="car-connect-row"><span>连接方式：ESP32 主动连接云端 WSS</span><button id="wifiCarConnect" type="button">刷新连接状态</button><button id="wifiCarDisconnect" type="button" disabled>停车</button></div>
+            <div class="car-test-buttons"><button type="button" data-car-action="left" disabled>左转</button><button type="button" data-car-action="straight" disabled>直行</button><button type="button" data-car-action="right" disabled>右转</button><button type="button" data-car-action="lane_left" disabled>向左变道</button><button type="button" data-car-action="lane_right" disabled>向右变道</button><button type="button" class="stop-button" data-car-action="stop" disabled>停车</button><button type="button" data-car-action="uturn" disabled title="发送 P6 预设掉头路线">掉头</button></div>
+            <p class="car-test-warning">测试前请架空车轮；控制指令会直接驱动车辆。</p>
+            <small id="carTestMessage" class="car-test-message" aria-live="polite">未发送控制指令</small>
+          </section>
+          <div class="command-panel">
+            <div class="command-head"><div><b>驾驶指令通道</b><small>按安全规则下发；风险动作停车，强制执行时停车并报警</small></div><span id="commandState" class="tag">未发送</span></div>
+            <div class="command-preview"><span>动作</span><strong id="commandAction">直行</strong><span>目标</span><strong id="commandTarget">WifiCar ESP32 · 待连接</strong></div>
+            <button id="sendCommand" type="button">发送当前决策</button>
+            <small id="commandHint">连接小车后，将动作直接发送到 ESP32 TCP 控制端。</small>
+          </div>
+        </section>
+      </div>
+      <div id="scenarioResults" class="bottom-grid">
+        <section class="panel"><div class="panel-head"><div><h3>感知结果</h3><span>板端环境模型 · 当前显示视图汇总</span></div><span class="tag" id="perceptionSource">等待板端结果</span></div><div class="perception" id="perception"><div>斑马线<strong>—</strong></div><div>行人<strong>—</strong></div><div>红灯<strong>—</strong></div><div>绿灯<strong>—</strong></div><div>黄灯<strong>—</strong></div></div><p class="footnote">实线/虚线、障碍物距离与导航识别尚需接入对应算法；视图汇总不等于本车通行信号。</p></section>
+        <section class="panel"><div class="panel-head"><div><h3>场景事件记录</h3><span>本次会话 · 最多 300 条</span></div><button id="export">导出 CSV</button></div><div class="event-table"><table><thead><tr><th>北京时间</th><th>来源 / 场景</th><th>决策</th><th>状态</th></tr></thead><tbody id="events"></tbody></table></div></section>
+      </div>
+      <footer>选题三 · 高级辅助驾驶系统 <span id="footerStatus">本地联调可离线使用；实测指标由板端提供</span></footer>
+      </div>
+      <section id="fusionPage" class="page-panel" hidden>
+        <section class="heading"><h2>视频融合</h2></section>
+        <section class="panel fusion-panel">
+          <div class="fusion-stage">
+            <div class="fusion-head"><div><b>360° 融合影像预览</b><small id="fusionSource">四路鱼眼加权全景 → 圆环映射</small></div><div class="fusion-status"><span class="tag fusion-calibration">初始参数 · 未标定</span><span class="tag" id="fusionState" role="status">等待视频连接</span></div></div>
+            <div class="fusion-toolbar"><div class="fusion-actions"><button id="fusionConnect" type="button">开始检测</button><button id="fusionDisconnect" type="button" disabled>停止检测</button></div><span id="fusionMetrics">— FPS · 1024 × 1024</span></div>
+            <div id="fusionInputState" class="fusion-input-state" role="status" hidden></div>
+            <canvas id="fusionCanvas" aria-label="四路视频融合影像预览"></canvas>
+            <div class="fusion-overlay"><span id="fusionOverlayText">融合结果仅用于界面联调，不代表已完成鸟瞰标定</span><span id="fusionFrameInfo">等待输入</span></div>
+            <details class="fusion-settings"><summary>融合参数</summary><form id="fusionSettings">
+              <label>前向<select name="front"><option value="0">通道 1 · 左上</option><option value="1">通道 2 · 右上</option><option value="2">通道 3 · 左下</option><option value="3">通道 4 · 右下</option></select></label>
+              <label>右向<select name="right"><option value="0">通道 1 · 左上</option><option value="1">通道 2 · 右上</option><option value="2">通道 3 · 左下</option><option value="3" selected>通道 4 · 右下</option></select></label>
+              <label>后向<select name="rear"><option value="0">通道 1 · 左上</option><option value="1" selected>通道 2 · 右上</option><option value="2">通道 3 · 左下</option><option value="3">通道 4 · 右下</option></select></label>
+              <label>左向<select name="left"><option value="0">通道 1 · 左上</option><option value="1">通道 2 · 右上</option><option value="2" selected>通道 3 · 左下</option><option value="3">通道 4 · 右下</option></select></label>
+              <label>鱼眼视场 / °<input name="fov" type="number" value="190" min="90" max="220" step="1" required></label>
+              <label>向下俯角 / °<input name="pitchDown" type="number" value="28" min="-60" max="60" step="1" required></label>
+              <label>内缘采样<input name="nearRow" type="number" value="0.68" min="0.01" max="1" step="0.01" required></label>
+              <label>外缘采样<input name="farRow" type="number" value="0.45" min="0" max="0.99" step="0.01" required></label>
+              <div class="fusion-parameter-actions"><button type="submit">应用参数</button><button type="reset">恢复初值</button><span id="fusionParameterState" role="status"></span></div>
+            </form></details>
+          </div>
+        </section>
+      </section>
+      <section id="detectionsPage" class="page-panel" hidden>
+        <section class="panel detection-log" aria-label="检测结果日志">
+          <div class="behavior-log-head detection-log-head">
+            <div><h3>检测结果</h3><span id="detectionConnection" role="status">等待 RK 上报</span><span id="detectionCount" hidden>0 个目标</span></div>
+            <div class="detection-filter-group">
+              <label>画面<select id="detectionSource"><option value="1" selected>前向画面</option><option value="2">后向画面</option><option value="3">左向画面</option><option value="4">右向画面</option><option value="all">全部四路</option></select></label>
+              <label>目标类型<select id="detectionFamily"><option value="all">全部类型</option><option value="bdd">道路目标</option><option value="traffic">交通信号灯</option><option value="road">虚线与实线</option></select></label>
+            </div>
+          </div>
+          <div class="detection-table-wrap"><table class="detection-table"><thead><tr><th>画面</th><th>类别</th><th>置信度</th><th>位置 (x1, y1, x2, y2)</th><th>检测帧号</th><th>接收时间</th><th>状态</th></tr></thead><tbody id="detectionRows"><tr><td colspan="7">尚未收到检测结果</td></tr></tbody></table></div>
+        </section>
+        <section class="demo-work-logs" aria-label="识别演示工作日志">
+          <div class="behavior-log-head demo-work-log-head">
+            <div class="demo-work-log-title"><h3>识别工作日志</h3></div>
+            <label>识别类别<select id="demoLogCategory"><option value="all">全部类别</option><option value="bdd">道路目标</option><option value="traffic">信号灯</option><option value="road">车道线</option></select></label>
+          </div>
+          <div id="demoLogEntries" class="demo-log-list" aria-live="polite"></div>
+        </section>
+        <section class="behavior-log" aria-label="智驾行为日志">
+          <div class="behavior-log-head"><div><h3>智驾行为日志</h3><span id="behaviorLogStatus" role="status">等待行为记录</span></div><label>行为类型<select id="behaviorCategory"><option value="all">全部类型</option><option value="turn">转弯</option><option value="lane_change">变道</option><option value="violation_warning">违规警告</option></select></label></div>
+          <div class="behavior-log-scroll" id="behaviorLogScroll"><table class="behavior-table"><thead><tr><th>依据帧号 / 证据编号</th><th>行为类别</th><th>行为执行时间</th><th>是否执行</th><th>用户操作</th><th>是否警告</th></tr></thead><tbody id="behaviorRows"><tr><td colspan="6">暂无行为日志</td></tr></tbody></table></div>
+          <div class="behavior-log-controls"><label>页码<input id="behaviorPageInput" type="number" min="1" step="1" value="1" inputmode="numeric" aria-label="跳转日志页码"></label><span id="behaviorPageInfo">第 1 / 1 页</span><button id="behaviorPageGo" type="button" aria-label="跳转页码">跳转</button><button id="behaviorExpand" type="button" aria-expanded="false">展开全部历史</button></div>
+        </section>
+      </section>
+      <section id="performancePage" class="page-panel performance-page" hidden>
+        <section class="panel performance-panel" aria-label="传输性能总览">
+          <div class="performance-hero"><div><div class="eyebrow">RK · TEXT TELEMETRY</div><h3>传输性能与实时推理</h3><p>推理数据、检测类别和控制方向通过结构化字符消息上报；视频传输指标独立显示。</p></div><span id="performanceConnection" class="pill">等待 WebRTC 视频</span></div>
+          <div class="performance-grid"><section class="panel perf-card"><h3>视频接收</h3><dl><div><dt>媒体状态</dt><dd id="perfMediaStatus">未连接</dd></div><div><dt>已接收帧</dt><dd id="perfFrames">—</dd></div><div><dt>接收帧率</dt><dd id="perfRxFps">—</dd></div><div><dt>视频分辨率</dt><dd id="perfResolution">—</dd></div></dl></section><section class="panel perf-card"><h3>实时传输</h3><dl><div><dt>解码帧率</dt><dd id="perfDecodeFps">—</dd></div><div><dt>接收码率</dt><dd id="perfBitrate">—</dd></div><div><dt>往返时延</dt><dd id="perfRtt">—</dd></div><div><dt>抖动</dt><dd id="perfJitter">—</dd></div></dl></section><section class="panel perf-card"><h3>接收质量</h3><dl><div><dt>累计丢包</dt><dd id="perfPacketsLost">—</dd></div><div><dt>累计丢帧</dt><dd id="perfDropped">—</dd></div><div><dt>冻结次数</dt><dd id="perfFreezes">—</dd></div><div><dt>RK 推理帧率</dt><dd id="perfInferFps">未接入</dd></div></dl></section></div>
+          <section class="panel rk-vision-card" aria-label="RK 实时推理遥测">
+            <div class="chart-head"><div><h3>RK 实时推理与车辆控制</h3><small id="rkVisionUpdated">等待 RK 上报</small></div><span class="tag" id="rkVisionState">未连接</span></div>
+            <div class="rk-vision-summary">
+              <div><span>运行模式</span><b id="rkVisionMode">—</b></div>
+              <div><span>箭头方向</span><b id="rkVisionDirection">—</b></div>
+              <div><span>箭头状态</span><b id="rkVisionArrow">—</b></div>
+              <div><span>安全判断</span><b id="rkVisionSafety">—</b></div>
+              <div><span>控制动作</span><b id="rkVisionAction">—</b></div>
+              <div><span>整轮推理</span><b id="rkVisionLatency">—</b></div>
+              <div><span>检测目标</span><b id="rkVisionDetections">—</b></div>
+            </div>
+            <p class="rk-vision-decision" id="rkVisionDecision">等待 RK 推理数据</p>
+            <div class="rk-vision-tables">
+              <div><h4>四路推理</h4><div class="rk-vision-table-wrap"><table><thead><tr><th>摄像头</th><th>耗时</th><th>目标数</th></tr></thead><tbody id="rkCameraRows"><tr><td colspan="3">等待上报</td></tr></tbody></table></div></div>
+              <div><h4>检测结果</h4><div class="rk-vision-table-wrap"><table><thead><tr><th>摄像头</th><th>类别</th><th>置信度</th></tr></thead><tbody id="rkDetectionRows"><tr><td colspan="3">等待上报</td></tr></tbody></table></div></div>
+            </div>
+          </section>
+          <div class="performance-charts">
+          <section class="panel chart-card pie-card"><div class="chart-head"><div><h3>四路推理耗时占比</h3><small>前、后、左、右四路单独推理耗时</small></div><span class="tag" id="perfTimingState">等待四路耗时</span></div><div class="timing-pie-wrap"><div class="pie-plot"><canvas id="performancePie" aria-label="RK 前后左右四路推理耗时占比"></canvas><div class="pie-center"><b id="perfTimingTotal">—</b><span>四路合计 ms</span></div></div><div class="timing-legend" id="perfTimingLegend"><span>等待 RK 上报四路推理耗时</span></div></div></section>
+          <section class="panel chart-card line-card"><div class="chart-head"><div><h3>RK 推理帧率趋势</h3><small>最近四路完成推理周期</small></div><span class="tag" id="perfSampleCount">0 样本</span></div><canvas id="performanceLine" aria-label="RK 四路推理帧率趋势"></canvas><div class="line-legend"><span><i class="legend-cyan"></i>推理 FPS</span></div></section>
+          </div>
+        </section>
+        <section class="panel webrtc-panel performance-webrtc" aria-label="RK3568 实时视频播放">
+          <div class="panel-head webrtc-panel-head"><div><h3>RK3568 实时感知视频</h3></div><span id="webrtcState" class="webrtc-state pending" role="status">未连接</span></div>
+          <div class="webrtc-stage"><video id="webrtcVideo" autoplay playsinline muted></video><div id="webrtcPlaceholder" class="webrtc-placeholder"><b>等待视频连接</b></div></div>
+          <div class="webrtc-toolbar"><div class="webrtc-actions"><button id="whepConnect" type="button">开始检测</button><button id="whepDisconnect" type="button" disabled>停止检测</button></div></div>
+          <div class="webrtc-footer"><span id="webrtcMetrics">分辨率 — · FPS — · 码率 —</span></div>
+        </section>
+      </section>
+      <section id="communicationPage" class="page-panel communication-page" hidden aria-label="RK 与 ESP32 实时通信监视">
+        <div class="heading"><div><div class="eyebrow">LIVE COMMUNICATION / RX · TX · ACK</div><h2>实时通信监视</h2><p class="comm-lede">查看 RK 原始上传、云端下发与 ESP32 回执。这里只观察数据，不发送测试动作。</p></div><span id="commConnection" class="comm-connection" role="status">等待连接</span></div>
+        <div class="comm-stats" aria-label="本次服务运行的通信计数"><div><span>RK 上传 · RX</span><strong id="commRkCount">0</strong><small id="commRkTime">尚未收到</small></div><div><span>下发小车 · TX</span><strong id="commTxCount">0</strong><small id="commTxTime">尚未发送</small></div><div><span>小车回传 · RX / ACK</span><strong id="commRxCount">0</strong><small id="commRxTime">尚未收到</small></div><div><span>ESP32 连接</span><strong id="commCarOnline" class="comm-device-state">待检测</strong><small>日志连接正常不等于设备在线</small></div></div>
+        <section class="panel comm-panel" aria-label="实时数据收发日志">
+          <div class="comm-toolbar"><label>链路<select id="commChannel"><option value="all">全部收发</option><option value="rk_rx">RK → 云端上位机</option><option value="car_tx">云端上位机 → 小车</option><option value="car_rx">小车 → 云端上位机</option><option value="system">连接 / 错误 / 超时</option></select></label><label>原文格式<select id="commFormat"><option value="text">文本 · 显示 CR/LF</option><option value="hex">HEX · UTF-8 字节</option><option value="json">JSON 格式化</option></select></label><label class="comm-search-label">搜索<input id="commSearch" type="search" placeholder="命令 / 帧号 / 内容" autocomplete="off"></label><button id="commPause" type="button">暂停显示</button><button id="commReconnect" type="button">重新连接</button><button id="commClear" type="button">清空本页</button><button id="commExport" type="button">导出筛选日志</button></div>
+          <div class="comm-options"><label><input id="commAutoScroll" type="checkbox" checked> 跟随最新</label><span id="commViewCount">0 条</span><span id="commPending" role="status"></span></div>
+          <div id="commNotice" class="comm-notice" hidden role="status"></div>
+          <div class="comm-table-head" aria-hidden="true"><span>时间（北京时间）</span><span>链路 / 状态</span><span>数据与原文</span></div>
+          <div id="commLog" class="comm-log" role="log" aria-label="实时通信记录"><div class="comm-empty">等待真实通信数据；不会自动生成或下发演示指令。</div></div>
+          <div class="comm-footer"><span>服务端滚动保留最近 500 条，服务重启后重新计数；可导出本页筛选记录。</span><span>TX 仅表示提交发送；ACK 表示 ESP32 返回确认，不代表已测得机械动作完成。</span></div>
+        </section>
+        <p class="comm-wire-note">传输通道：RK HTTPS JSON → 云端 → ESP32 WSS。命令原文中的 \r\n 为实际结束符；HEX 只做显示转换。ESP32 USB/UART 调试输出目前未转发，此处不冒充串口采样。密钥字段脱敏；超长报文显示截断提示。</p>
+      </section>
+      <section id="deploymentPage" class="page-panel deployment-page" hidden aria-label="系统整体部署拓扑">
+        <section class="heading deployment-heading">
+          <div><div class="eyebrow">SYSTEM DEPLOYMENT / 3D TOPOLOGY</div><h2>整体部署与数据链路</h2><p class="deployment-lede">从四路 OV5640 采集，到 FPGA 预处理、RK3568 推理、云端遥测，再到上位机和 ESP32 小车执行。</p></div>
+          <div class="deployment-actions"><button id="deploymentFlowData" class="flow-toggle active" type="button">数据流</button><button id="deploymentFlowControl" class="flow-toggle" type="button">控制流</button><button id="deploymentFocus" class="flow-toggle deployment-focus-toggle" type="button">板卡细节</button><button id="deploymentExplode" class="flow-toggle" type="button">爆炸视图</button><span id="deploymentUpdated" class="tag">等待状态</span></div>
+        </section>
+        <section class="deployment-status-strip" aria-label="部署节点状态">
+          <div class="deployment-status-item"><i id="deployStatusFpga" class="status-dot pending"></i><span>PG2L100H / FPGA</span><b id="deployStatusFpgaText">板端采集中</b></div>
+          <div class="deployment-status-item"><i id="deployStatusRk" class="status-dot pending"></i><span>RK3568</span><b id="deployStatusRkText">等待遥测</b></div>
+          <div class="deployment-status-item"><i id="deployStatusCloud" class="status-dot pending"></i><span>云端中继</span><b id="deployStatusCloudText">等待连接</b></div>
+          <div class="deployment-status-item"><i id="deployStatusCar" class="status-dot pending"></i><span>ESP32 小车</span><b id="deployStatusCarText">等待 WSS</b></div>
+        </section>
+        <div class="deployment-workspace">
+        <section class="deployment-stage panel" aria-label="设备三维拓扑图">
+          <div id="deploymentScene" class="deployment-scene" aria-label="可旋转的系统三维部署模型"></div>
+          <div id="deploymentSceneFallback" class="deployment-scene-fallback" hidden>三维场景暂不可用，设备拓扑和链路信息仍可查看。</div>
+          <div class="deployment-stage-grid"></div>
+          <div class="deployment-stage-caption"><span class="stage-kicker">LIVE SYSTEM MAP</span><strong>四路采集 · 一路决策 · 闭环执行</strong><small>点击设备节点查看对应实物与链路说明</small></div>
+          <div class="deployment-route route-camera route-data"><span>OV5640 · F_GPIO / FMC</span></div>
+          <div class="deployment-route route-pcie route-data"><span>PCIe · 四路帧</span></div>
+          <div class="deployment-route route-cloud route-data"><span>HTTPS · JSON</span></div>
+          <div class="deployment-route route-command route-control"><span>WSS · 指令</span></div>
+          <div class="deployment-route route-car route-control"><span>动作 / 报警</span></div>
+          <button class="device-card camera-rig" data-device="cameras" type="button"><span class="device-index">01</span><span class="device-icon camera-icon">◉</span><span class="device-title">两块双 OV5640</span><span class="device-subtitle">FMC + F_GPIO · 各一块双目</span><span class="device-detail">两块模组均竖立安装<br>两块双目 · 四个镜头</span><img src="./assets/deployment/dual-ov5640-surface.webp" alt="双 OV5640 摄像头模组实物" loading="lazy"></button>
+          <button class="device-card fpga-card" data-device="fpga" type="button"><span class="device-index">02</span><span class="device-icon board-icon">▦</span><span class="device-title">PG2L100H FPGA</span><span class="device-subtitle">底层主板 · FMC 插座</span><span class="device-detail">FMC 转接板插在主板上<br>FPGA 负责采集与预处理</span><img src="./assets/deployment/pg2l100h-surface.webp" alt="PG2L100H 开发板实物" loading="lazy"></button>
+          <button class="device-card rk-card" data-device="rk" type="button"><span class="device-index">03</span><span class="device-icon cpu-icon">⌁</span><span class="device-title">板载 RK3568</span><span class="device-subtitle">与 FPGA 同在 100H 主板</span><span class="device-detail">识别目标、箭头与安全状态<br>生成结构化字符遥测</span><img src="./assets/deployment/rk-display.jpg" alt="RK3568 四路显示实物" loading="lazy"></button>
+          <button class="device-card cloud-card" data-device="cloud" type="button"><span class="device-index">04</span><span class="device-icon cloud-icon">☁</span><span class="device-title">云端中继</span><span class="device-subtitle">adas.wmnnj.top</span><span class="device-detail">接收 RK JSON<br>转发车辆动作与回执</span></button>
+          <button class="device-card upper-card" data-device="upper" type="button"><span class="device-index">05</span><span class="device-icon screen-icon">▣</span><span class="device-title">上位机</span><span class="device-subtitle">检测结果 · 状态可视化</span><span class="device-detail">显示四路识别结果<br>显示动作与执行状态</span><img src="./assets/deployment/upper-screen.jpg" alt="上位机四路识别界面" loading="lazy"></button>
+          <button class="device-card car-card" data-device="car" type="button"><span class="device-index">06</span><span class="device-icon car-icon">▰</span><span class="device-title">ESP32 智能小车</span><span class="device-subtitle">WSS 控制 · TCP 回执</span><span class="device-detail">P1–P5：动作路线<br>H：蜂鸣与红灯报警</span><img src="./assets/deployment/wifi-car-side-actual.webp" alt="ESP32 智能小车实物" loading="lazy"></button>
+          <div class="deployment-flow-legend"><span><i class="legend-line data-line"></i>数据 / 识别上行</span><span><i class="legend-line control-line"></i>控制 / 回执下行</span></div>
+        </section>
+        <aside class="deployment-inspector" aria-label="部件介绍与选择"><div class="deployment-inspector-head"><span id="deploymentSelectionState" role="status">自由浏览 · 点击部件锁定</span><button id="deploymentUnlock" type="button">返回全景</button></div><div class="deployment-device-list" aria-label="选择并锁定部件"><button type="button" data-deployment-target="fpga" aria-pressed="false">100H 主板</button><button type="button" data-deployment-target="rk" aria-pressed="false">板载 RK3568</button><button type="button" data-deployment-target="fmc" aria-pressed="false">FMC 转接板</button><button type="button" data-deployment-target="adapter" aria-pressed="false">第二级接口板</button><button type="button" data-deployment-target="cameras" aria-pressed="false">FMC 双目</button><button type="button" data-deployment-target="gpioCameras" aria-pressed="false">F_GPIO 双目</button><button type="button" data-deployment-target="display" aria-pressed="false">四路显示器</button><button type="button" data-deployment-target="cloud" aria-pressed="false">云端中继</button><button type="button" data-deployment-target="upper" aria-pressed="false">上位机</button><button type="button" data-deployment-target="car" aria-pressed="false">ESP32 小车</button></div>
+          <article class="panel deployment-detail-card"><div class="panel-head"><div><h3 id="deploymentDetailTitle">链路说明</h3><span id="deploymentDetailKicker">当前系统结构</span></div><span id="deploymentDetailState" class="tag">四路闭环</span></div><img id="deploymentSelectedPhoto" class="deployment-selected-photo" src="./assets/deployment/pg2l100h-surface.webp" alt="板卡实物参考"><p id="deploymentDetailText">四路摄像头采集后进入 PG2L100H，FPGA 完成拼接与预处理，经 PCIe 送入 RK3568 做 RKNN 识别。RK 只上报结构化字符和检测结果，云端负责中继，上位机显示结果并把动作交给 ESP32 小车。</p><div id="deploymentDetailFacts" class="deployment-facts"><span>输入 <b>4 路 OV5640</b></span><span>推理 <b>RKNN / RK3568</b></span><span>控制 <b>ESP32 WSS</b></span></div></article>
+        </aside>
+        </div>
+        <section class="deployment-detail-grid">
+          <article class="panel deployment-photo-card"><div class="panel-head"><div><h3>装配实物参考</h3><span>每块板正反面与摄像头模组</span></div><span class="tag">按现场层级</span></div><figure class="deployment-assembly-reference"><img src="./assets/deployment/assembly-installed.png" alt="PG2L100H、FMC 转接板和上层接口板现场总装"><figcaption>100H 板载 RK3568；FMC 转接板横放；FMC 与 F_GPIO 各接一块竖立双目</figcaption></figure><div class="deployment-photo-strip deployment-hardware-strip"><img src="./assets/deployment/pg2l100h-surface.webp" alt="PG2L100H 接口标注实拍"><img src="./assets/deployment/fmc-adapter-front.webp" alt="FMC 转接板正面"><img src="./assets/deployment/fmc-adapter-back.webp" alt="FMC 转接板背面"><img src="./assets/deployment/secondary-adapter-front.webp" alt="二级接口板正面"><img src="./assets/deployment/secondary-adapter-back.webp" alt="二级接口板背面"><img src="./assets/deployment/dual-ov5640-surface.webp" alt="双 OV5640 摄像头模组"></div><div class="deployment-photo-caption"><span>PG2L100H</span><span>FMC 正面</span><span>FMC 背面</span><span>二级板正面</span><span>二级板背面</span><span>双 OV5640</span></div></article>
+        </section>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

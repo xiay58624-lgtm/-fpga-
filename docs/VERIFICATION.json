@@ -1,0 +1,177 @@
+{
+  "checked_at": "2026-11-03T08:53:30.153764+00:00",
+  "node_for_tests": "v24.22.1",
+  "source_manifest_hashes_verified": 705,
+  "javascript_syntax": [
+    {
+      "path": "upper_computer/adas-communication.js",
+      "exit": 0
+    },
+    {
+      "path": "upper_computer/adas-deployment-3d.js",
+      "exit": 0
+    },
+    {
+      "path": "upper_computer/adas-deployment.js",
+      "exit": 0
+    },
+    {
+      "path": "upper_computer/adas-detections.js",
+      "exit": 0
+    },
+    {
+      "path": "upper_computer/adas-fusion.js",
+      "exit": 0
+    },
+    {
+      "path": "upper_computer/adas-policy.js",
+      "exit": 0
+    },
+    {
+      "path": "upper_computer/adas-webrtc.js",
+      "exit": 0
+    },
+    {
+      "path": "upper_computer/adas.js",
+      "exit": 0
+    },
+    {
+      "path": "upper_computer/backend/communication-log.js",
+      "exit": 0
+    },
+    {
+      "path": "upper_computer/backend/detection-report.js",
+      "exit": 0
+    },
+    {
+      "path": "upper_computer/backend/rk-command-loop.js",
+      "exit": 0
+    },
+    {
+      "path": "upper_computer/backend/rk-vision-command.js",
+      "exit": 0
+    },
+    {
+      "path": "upper_computer/backend/server.js",
+      "exit": 0
+    },
+    {
+      "path": "upper_computer/backend/wifi-car-bridge.js",
+      "exit": 0
+    },
+    {
+      "path": "upper_computer/backend/wifi-car-ws-bridge.js",
+      "exit": 0
+    }
+  ],
+  "relay_python_syntax": "passed",
+  "fpga_pds_input_paths_present": 67,
+  "fpga_rebuilt": false,
+  "fpga_flashed_verified": false,
+  "rk_main_source_references_complete": true,
+  "rk_missing_legacy_test_files": [
+    "tests/LatestFramePolicyTests.cpp",
+    "tests/OverlayPatchTests.cpp",
+    "tests/PlateAuthenticityTests.cpp",
+    "tests/PlateCategoryTests.cpp",
+    "tests/PlateColorArbitrationTests.cpp",
+    "tests/PlateConsensusTests.cpp",
+    "tests/PlateDetectorProfilesTests.cpp",
+    "tests/PlateOcrPolicyTests.cpp",
+    "tests/PlatePostprocessTests.cpp",
+    "tests/PlateRecognizerProfilesTests.cpp",
+    "tests/PlateSlidingTests.cpp",
+    "tests/PlateTextValidationTests.cpp"
+  ],
+  "rk_board_connection": {
+    "checked_at": "2026-11-03T08:52:44.888502+00:00",
+    "connected": false,
+    "error": "TimeoutError"
+  },
+  "rk_live_source_verified": false,
+  "rk_compile_performed": false,
+  "car_only_wifi_configuration_externalized": true,
+  "car_reflashed": false,
+  "continuous_commands_unit_test": "passed",
+  "adas_policy_test": "passed",
+  "wifi_car_bridge_test": "passed",
+  "full_http_websocket_integration": {
+    "ok": true,
+    "test": "isolated full production server HTTP + WebSocket",
+    "commands": [
+      "P1",
+      "P1",
+      "P1",
+      "K",
+      "P2",
+      "P2",
+      "K",
+      "K",
+      "K",
+      "P3",
+      "K",
+      "P4",
+      "K",
+      "P5",
+      "H",
+      "H",
+      "H",
+      "H",
+      "H",
+      "K",
+      "P4",
+      "K",
+      "K",
+      "P1",
+      "P1",
+      "P1",
+      "P1",
+      "P1",
+      "P1",
+      "P1",
+      "P1",
+      "P1",
+      "P1",
+      "P1",
+      "P1",
+      "P1",
+      "P1",
+      "P1",
+      "P1",
+      "P1",
+      "P1",
+      "P1",
+      "K",
+      "K",
+      "P1",
+      "K",
+      "K",
+      "K"
+    ],
+    "alarm_count": 5,
+    "checks": [
+      "authenticated HTTP",
+      "stable forward repeated",
+      "unknown holds last command",
+      "yellow same as green",
+      "all six directions",
+      "timed turn repeated",
+      "navigation red ordinary stop",
+      "ADAS red arrow preserves direction and repeats H",
+      "yellow after red clears alarm",
+      "ordinary selected stop does not alarm",
+      "immediate K before changed movement",
+      "telemetry watchdog",
+      "off stops refresh",
+      "older operator automatic alarm normalized to stop"
+    ]
+  },
+  "legacy_adas_status_test": {
+    "passed": false,
+    "error": "backend startup timeout",
+    "reason": "Fixture omits required rk-vision-command.js, rk-command-loop.js, communication-log.js; production source unchanged."
+  },
+  "physical_car_action_verified": false,
+  "cloud_services_changed_during_export": false,
+  "excluded": "credentials, private keys, runtime data, node_modules, compiled car firmware, stale FPGA bitstream, unverified RK application binary"
+}

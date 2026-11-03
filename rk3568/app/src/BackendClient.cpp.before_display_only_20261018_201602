@@ -1,0 +1,755 @@
+#include "BackendClient.h"
+#include "BackendSettings.h"
+
+#include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QSaveFile>
+#include <QStandardPaths>
+#include <QTimeZone>
+#include <QUuid>
+#include <algorithm>
+#include <utility>
+
+namespace {
+
+constexpr const char *kReportQueueSchema = "rk3568.report_queue.v1";
+constexpr const char *kReportSchema = "rk3568.cloud_report.v1";
+
+QString backendNowBjText() {
+    const QTimeZone tz("Asia/Shanghai");
+    return QDateTime::currentDateTimeUtc().toTimeZone(tz).toString("yyyy-MM-dd HH:mm:ss");
+}
+
+int envInt(const char *name, int fallback, int minimum, int maximum) {
+    const QByteArray raw = qgetenv(name).trimmed();
+    if (raw.isEmpty()) return fallback;
+    bool ok = false;
+    const int value = raw.toInt(&ok);
+    if (!ok) return fallback;
+    return std::max(minimum, std::min(maximum, value));
+}
+
+QString normalizePath(QString path) {
+    path = path.trimmed();
+    if (!path.isEmpty() && !path.startsWith('/')) path.prepend('/');
+    return path;
+}
+
+bool isCloudReportPath(const QString &path) {
+    return path.startsWith("/api/rk/report/");
+}
+
+bool isSnapshotPath(const QString &path) {
+    return path == "/api/rk/report/status" || path == "/api/rk/report/business";
+}
+
+bool isDurableReportPath(const QString &path) {
+    return path != "/api/rk/report/status";
+}
+
+QString reportTypeFromPath(const QString &path) {
+    const int slash = path.lastIndexOf('/');
+    return slash >= 0 ? path.mid(slash + 1) : path;
+}
+
+QUrl endpointUrl(QUrl base, const QString &path) {
+    QString basePath = base.path();
+    if (!basePath.endsWith('/')) basePath += '/';
+    base.setPath(basePath + (path.startsWith('/') ? path.mid(1) : path));
+    base.setQuery(QString("ts=%1").arg(QDateTime::currentMSecsSinceEpoch()));
+    return base;
+}
+
+QString defaultReportQueuePath() {
+    const QByteArray configured = qgetenv("RK3568_REPORT_QUEUE_PATH").trimmed();
+    if (!configured.isEmpty()) return QString::fromUtf8(configured);
+    if (QDir("/userdata").exists()) return QString("/userdata/rk3568/report_queue.json");
+    QString base = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+    if (base.isEmpty()) base = QDir::homePath();
+    return QDir(base).filePath("report_queue.json");
+}
+
+QString stableDeviceId() {
+    QString id = QString::fromUtf8(qgetenv("RK3568_DEVICE_ID")).trimmed();
+    if (!id.isEmpty()) return id;
+
+    QFile machineId("/etc/machine-id");
+    if (machineId.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        const QString value = QString::fromLatin1(machineId.readAll()).trimmed();
+        if (!value.isEmpty()) return QString("rk3568-%1").arg(value.left(16));
+    }
+    id = QString::fromUtf8(qgetenv("HOSTNAME")).trimmed();
+    return id.isEmpty() ? QString("rk3568") : QString("rk3568-%1").arg(id);
+}
+
+qint64 retryDelayMs(int attempts) {
+    const int shift = std::max(0, std::min(5, attempts - 1));
+    return std::min<qint64>(30000, 1000LL << shift);
+}
+
+bool isPermanentHttpFailure(int httpCode) {
+    if (httpCode < 400 || httpCode >= 500) return false;
+    return httpCode != 408 && httpCode != 425 && httpCode != 429;
+}
+
+QString responseErrorText(const QJsonObject &object, const QString &fallback) {
+    QString error = object.value("error").toString().trimmed();
+    if (error.isEmpty()) error = object.value("message").toString().trimmed();
+    return error.isEmpty() ? fallback : error;
+}
+
+QString responseAckId(const QJsonObject &object) {
+    QString id = object.value("ack_id").toString().trimmed();
+    if (id.isEmpty()) id = object.value("event_id").toString().trimmed();
+    if (id.isEmpty()) id = object.value("report_id").toString().trimmed();
+    return id;
+}
+
+bool responseMeansDuplicate(const QJsonObject &object) {
+    if (object.value("duplicate").toBool(false)) return true;
+    const QString code = object.value("code").toString().trimmed().toLower();
+    const QString error = object.value("error").toString().trimmed().toLower();
+    return code.contains("duplicate") || code.contains("already_exists") ||
+           error.contains("duplicate") || error.contains("already_exists");
+}
+
+} // namespace
+
+BackendClient::BackendClient(QObject *parent) : QObject(parent) {
+    m_reportQueuePath = defaultReportQueuePath();
+    m_deviceId = stableDeviceId();
+    m_reportTimeoutMs = envInt("RK3568_REPORT_TIMEOUT_MS", 5000, 1000, 60000);
+    m_maxPendingReports = envInt("RK3568_REPORT_QUEUE_MAX", 512, 16, 5000);
+    m_maxPendingReportBytes = envInt(
+        "RK3568_REPORT_QUEUE_MAX_BYTES", 32 * 1024 * 1024,
+        1 * 1024 * 1024, 256 * 1024 * 1024);
+    m_maxRejectedReports = envInt("RK3568_REPORT_REJECTED_MAX", 64, 8, 512);
+
+    m_timer.setInterval(envInt("RK3568_BACKEND_PING_INTERVAL_MS", 5000, 1000, 60000));
+    connect(&m_timer, &QTimer::timeout, this, &BackendClient::pingOnce);
+
+    m_reportTimer.setInterval(250);
+    connect(&m_reportTimer, &QTimer::timeout, this, &BackendClient::processReportQueue);
+
+    m_reportSaveTimer.setSingleShot(true);
+    m_reportSaveTimer.setInterval(250);
+    connect(&m_reportSaveTimer, &QTimer::timeout, this, &BackendClient::saveReportQueue);
+
+    loadReportQueue();
+}
+
+BackendClient::~BackendClient() {
+    if (m_reportQueueDirty) saveReportQueue();
+}
+
+void BackendClient::setBaseUrl(const QUrl &baseUrl) {
+    setBaseUrl(baseUrl, "manual");
+}
+
+void BackendClient::setBaseUrl(const QUrl &baseUrl, const QString &source) {
+    const QString src = source.trimmed().isEmpty() ? "manual" : source.trimmed();
+    if (m_baseUrl == baseUrl && m_source == src) {
+        processReportQueue();
+        return;
+    }
+    m_candidates.clear();
+    m_candidateIndex = 0;
+    m_baseLocked = true;
+    m_failStreak = 0;
+    m_baseUrl = baseUrl;
+    m_source = src;
+    setOk(false, "not_tested");
+    emit baseUrlChanged(m_baseUrl);
+    if (m_timer.isActive()) pingOnce();
+    processReportQueue();
+}
+
+void BackendClient::setBaseUrlCandidates(const QVector<QUrl> &candidates) {
+    m_candidates = candidates;
+    m_candidateIndex = 0;
+    m_baseLocked = false;
+    m_source = "auto";
+    m_failStreak = 0;
+    setOk(false, "not_tested");
+    if (!m_candidates.isEmpty()) {
+        const QUrl next = m_candidates.value(0);
+        if (m_baseUrl != next) {
+            m_baseUrl = next;
+            emit baseUrlChanged(m_baseUrl);
+        }
+    }
+    if (m_timer.isActive()) pingOnce();
+    processReportQueue();
+}
+
+bool BackendClient::autoDiscoveryAllowed() const {
+    return m_source == "empty" || m_source == "auto";
+}
+
+void BackendClient::start() {
+    if (!m_timer.isActive()) m_timer.start();
+    if (!m_reportTimer.isActive()) m_reportTimer.start();
+    pingOnce();
+    processReportQueue();
+}
+
+void BackendClient::stop() {
+    m_timer.stop();
+    m_reportTimer.stop();
+    if (m_reportQueueDirty) saveReportQueue();
+}
+
+bool BackendClient::postJson(const QString &pathIn, const QJsonObject &body) {
+    const QString path = normalizePath(pathIn);
+    if (path.isEmpty()) return false;
+    if (isCloudReportPath(path)) return enqueueReport(path, body);
+    if (!m_baseUrl.isValid() || m_baseUrl.host().isEmpty()) return false;
+
+    QNetworkRequest request(endpointUrl(m_baseUrl, path));
+    request.setHeader(QNetworkRequest::UserAgentHeader, "rk3568-gui");
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    QNetworkReply *reply = m_nam.post(request, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    reply->setParent(this);
+    QTimer::singleShot(m_reportTimeoutMs, reply, [reply]() {
+        if (reply->isRunning()) reply->abort();
+    });
+    connect(reply, &QNetworkReply::finished, reply, &QObject::deleteLater);
+    return true;
+}
+
+bool BackendClient::enqueueReport(const QString &path, const QJsonObject &body) {
+    QJsonObject payload = body;
+    QString reportId = payload.value("event_id").toString().trimmed();
+    if (reportId.isEmpty()) reportId = payload.value("report_id").toString().trimmed();
+    if (reportId.isEmpty()) {
+        reportId = QString("%1-%2")
+                       .arg(m_deviceId, QUuid::createUuid().toString(QUuid::WithoutBraces));
+    }
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    payload.insert("device", payload.value("device").toString("rk3568"));
+    if (!payload.contains("rk_device_id")) payload.insert("rk_device_id", m_deviceId);
+    payload.insert("event_id", reportId);
+    payload.insert("report_id", reportId);
+    payload.insert("report_schema", kReportSchema);
+    payload.insert("report_type", reportTypeFromPath(path));
+    payload.insert("delivery_semantics", "at_least_once");
+    if (!payload.contains("report_created_at")) payload.insert("report_created_at", backendNowBjText());
+    if (!payload.contains("report_created_at_ms")) {
+        payload.insert("report_created_at_ms", static_cast<double>(nowMs));
+    }
+
+    QueuedReport item;
+    item.id = reportId;
+    item.path = path;
+    item.body = payload;
+    item.createdAtMs = nowMs;
+
+    bool durableChanged = isDurableReportPath(path);
+    const int firstMutable = m_reportInFlight ? 1 : 0;
+    if (isSnapshotPath(path)) {
+        for (int i = m_pendingReports.size() - 1; i >= firstMutable; --i) {
+            if (m_pendingReports[i].path != path) continue;
+            durableChanged = durableChanged || isDurableReportPath(m_pendingReports[i].path);
+            m_pendingReports.removeAt(i);
+        }
+    }
+
+    int insertAt = m_pendingReports.size();
+    if (path != "/api/rk/report/status") {
+        while (insertAt > firstMutable &&
+               m_pendingReports[insertAt - 1].path == "/api/rk/report/status") {
+            --insertAt;
+        }
+    }
+    m_pendingReports.insert(insertAt, item);
+
+    while (m_pendingReports.size() > m_maxPendingReports) {
+        int dropIndex = -1;
+        for (int i = firstMutable; i < m_pendingReports.size(); ++i) {
+            if (m_pendingReports[i].path == "/api/rk/report/status") {
+                dropIndex = i;
+                break;
+            }
+        }
+        if (dropIndex < 0) dropIndex = firstMutable < m_pendingReports.size() ? firstMutable : -1;
+        if (dropIndex < 0) break;
+        QueuedReport dropped = m_pendingReports.takeAt(dropIndex);
+        if (isDurableReportPath(dropped.path)) {
+            ++m_reportDroppedTotal;
+            moveToRejected(dropped, "queue_capacity");
+            durableChanged = true;
+        }
+    }
+    if (trimPendingReportsToByteLimit()) durableChanged = true;
+
+    m_lastReportId = reportId;
+    m_lastReportPath = path;
+    m_lastReportResult = "queued";
+    m_lastReportError.clear();
+    if (durableChanged) scheduleReportQueueSave();
+    QTimer::singleShot(0, this, &BackendClient::processReportQueue);
+    return true;
+}
+
+void BackendClient::processReportQueue() {
+    if (m_reportInFlight || m_pendingReports.isEmpty()) return;
+    if (!m_baseUrl.isValid() || m_baseUrl.host().isEmpty()) return;
+
+    QueuedReport &item = m_pendingReports.first();
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (item.nextAttemptMs > nowMs) return;
+
+    ++item.attempts;
+    item.lastError.clear();
+    m_lastReportId = item.id;
+    m_lastReportPath = item.path;
+    m_lastReportResult = "sending";
+    m_lastReportError.clear();
+    m_lastReportAttemptAt = backendNowBjText();
+    if (isDurableReportPath(item.path)) scheduleReportQueueSave();
+
+    QNetworkRequest request(endpointUrl(m_baseUrl, item.path));
+    request.setHeader(QNetworkRequest::UserAgentHeader, "rk3568-gui");
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    request.setRawHeader("Idempotency-Key", item.id.toUtf8());
+    request.setRawHeader("X-RK-Event-ID", item.id.toUtf8());
+    request.setRawHeader("X-RK-Report-Attempt", QByteArray::number(item.attempts));
+
+    QNetworkReply *reply = m_nam.post(
+        request, QJsonDocument(item.body).toJson(QJsonDocument::Compact));
+    reply->setParent(this);
+    m_reportInFlight = true;
+    const QString reportId = item.id;
+    QTimer::singleShot(m_reportTimeoutMs, reply, [reply]() {
+        if (reply->isRunning()) reply->abort();
+    });
+    connect(reply, &QNetworkReply::finished, this, [this, reply, reportId]() {
+        finishReportReply(reply, reportId);
+    });
+}
+
+void BackendClient::finishReportReply(QNetworkReply *reply, const QString &reportId) {
+    const int httpCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QByteArray responseData = reply->isOpen() ? reply->readAll()
+                                                    : QByteArray();
+    const QNetworkReply::NetworkError networkError = reply->error();
+    const QString networkErrorText = networkError == QNetworkReply::NoError
+                                         ? QString()
+                                         : reply->errorString();
+    reply->deleteLater();
+    m_reportInFlight = false;
+    m_lastReportHttpStatus = httpCode;
+
+    int reportIndex = -1;
+    for (int i = 0; i < m_pendingReports.size(); ++i) {
+        if (m_pendingReports[i].id == reportId) {
+            reportIndex = i;
+            break;
+        }
+    }
+    if (reportIndex < 0) {
+        QTimer::singleShot(0, this, &BackendClient::processReportQueue);
+        return;
+    }
+
+    QJsonObject responseObject;
+    bool responseJsonOk = responseData.trimmed().isEmpty();
+    if (!responseData.trimmed().isEmpty()) {
+        QJsonParseError parseError;
+        const QJsonDocument response = QJsonDocument::fromJson(responseData, &parseError);
+        if (parseError.error == QJsonParseError::NoError && response.isObject()) {
+            responseObject = response.object();
+            responseJsonOk = true;
+        }
+    }
+
+    QString failure;
+    bool accepted = false;
+    if (httpCode >= 200 && httpCode < 300) {
+        if (!responseJsonOk) {
+            failure = "bad_json_ack";
+        } else if (!responseObject.isEmpty() && responseObject.contains("ok") &&
+                   !responseObject.value("ok").toBool(false)) {
+            failure = responseErrorText(responseObject, "remote_rejected");
+        } else {
+            accepted = true;
+        }
+    } else if (httpCode == 409 && responseJsonOk && responseMeansDuplicate(responseObject)) {
+        accepted = true;
+    } else if (httpCode > 0) {
+        failure = responseErrorText(responseObject, QString("HTTP %1").arg(httpCode));
+    } else {
+        failure = networkErrorText.isEmpty() ? "network_error" : networkErrorText;
+    }
+
+    const QString ackId = responseAckId(responseObject);
+    if (accepted && !ackId.isEmpty() && ackId != reportId) {
+        accepted = false;
+        failure = "ack_id_mismatch";
+    }
+
+    QueuedReport &report = m_pendingReports[reportIndex];
+    const bool durable = isDurableReportPath(report.path);
+    if (accepted) {
+        m_lastReportId = report.id;
+        m_lastReportPath = report.path;
+        m_lastReportResult = "delivered";
+        m_lastReportError.clear();
+        m_lastReportOkAt = backendNowBjText();
+        m_lastReportAckId = ackId.isEmpty() ? report.id : ackId;
+        ++m_reportAcceptedTotal;
+        m_pendingReports.removeAt(reportIndex);
+        if (durable) scheduleReportQueueSave();
+        QTimer::singleShot(0, this, &BackendClient::processReportQueue);
+        return;
+    }
+
+    report.lastError = failure;
+    m_lastReportId = report.id;
+    m_lastReportPath = report.path;
+    m_lastReportError = failure;
+    if (isPermanentHttpFailure(httpCode)) {
+        QueuedReport rejected = report;
+        m_pendingReports.removeAt(reportIndex);
+        m_lastReportResult = "rejected";
+        if (durable) moveToRejected(rejected, failure);
+        else ++m_reportRejectedTotal;
+        QTimer::singleShot(0, this, &BackendClient::processReportQueue);
+        return;
+    }
+
+    report.nextAttemptMs = QDateTime::currentMSecsSinceEpoch() + retryDelayMs(report.attempts);
+    m_lastReportResult = "retry_wait";
+    ++m_reportRetryTotal;
+    if (durable) scheduleReportQueueSave();
+}
+
+void BackendClient::moveToRejected(QueuedReport report, const QString &error) {
+    report.lastError = error;
+    report.nextAttemptMs = 0;
+    const QStringList largeFields = {
+        "thumb_jpeg_base64", "image_jpeg_base64", "frame_jpeg_base64"
+    };
+    bool omitted = false;
+    for (const QString &field : largeFields) {
+        if (!report.body.contains(field)) continue;
+        report.body.remove(field);
+        omitted = true;
+    }
+    if (omitted) report.body.insert("rejected_large_fields_omitted", true);
+    m_rejectedReports.append(report);
+    while (m_rejectedReports.size() > m_maxRejectedReports) m_rejectedReports.removeFirst();
+    ++m_reportRejectedTotal;
+    scheduleReportQueueSave();
+}
+
+qint64 BackendClient::queuedReportBytes(const QueuedReport &report) const {
+    // The body contains the large base64 fields. Include a small allowance for
+    // the queue envelope so this bound remains conservative after serialization.
+    return static_cast<qint64>(
+               QJsonDocument(report.body).toJson(QJsonDocument::Compact).size()) +
+           512;
+}
+
+bool BackendClient::trimPendingReportsToByteLimit() {
+    qint64 bytes = 0;
+    for (const QueuedReport &report : m_pendingReports) {
+        if (isDurableReportPath(report.path)) bytes += queuedReportBytes(report);
+    }
+
+    bool changed = false;
+    const int firstMutable = m_reportInFlight ? 1 : 0;
+    while (bytes > m_maxPendingReportBytes) {
+        int dropIndex = -1;
+        for (int i = firstMutable; i < m_pendingReports.size(); ++i) {
+            if (isDurableReportPath(m_pendingReports[i].path)) {
+                dropIndex = i;
+                break;
+            }
+        }
+        if (dropIndex < 0) break;
+        QueuedReport dropped = m_pendingReports.takeAt(dropIndex);
+        bytes -= queuedReportBytes(dropped);
+        ++m_reportDroppedTotal;
+        moveToRejected(std::move(dropped), "queue_byte_capacity");
+        changed = true;
+    }
+    return changed;
+}
+
+void BackendClient::loadReportQueue() {
+    QFile file(m_reportQueuePath);
+    if (!file.exists()) return;
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        m_reportQueuePersistOk = false;
+        m_reportQueuePersistError = file.errorString();
+        return;
+    }
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        m_reportQueuePersistOk = false;
+        m_reportQueuePersistError = parseError.errorString();
+        return;
+    }
+
+    const QJsonObject root = document.object();
+    auto loadItems = [](const QJsonArray &array, QList<QueuedReport> &target, bool pending) {
+        for (const QJsonValue &value : array) {
+            if (!value.isObject()) continue;
+            const QJsonObject object = value.toObject();
+            QueuedReport report;
+            report.id = object.value("id").toString().trimmed();
+            report.path = normalizePath(object.value("path").toString());
+            report.body = object.value("body").toObject();
+            report.attempts = std::max(0, object.value("attempts").toInt(0));
+            report.createdAtMs = static_cast<qint64>(object.value("created_at_ms").toDouble(0));
+            report.nextAttemptMs = pending ? 0 : static_cast<qint64>(object.value("next_attempt_ms").toDouble(0));
+            report.lastError = object.value("last_error").toString();
+            if (report.id.isEmpty()) report.id = report.body.value("event_id").toString().trimmed();
+            if (report.id.isEmpty() || !isCloudReportPath(report.path) || report.body.isEmpty()) continue;
+            if (pending && !isDurableReportPath(report.path)) continue;
+            target.append(report);
+        }
+    };
+    loadItems(root.value("pending").toArray(), m_pendingReports, true);
+    loadItems(root.value("rejected").toArray(), m_rejectedReports, false);
+    while (m_pendingReports.size() > m_maxPendingReports) m_pendingReports.removeLast();
+    while (m_rejectedReports.size() > m_maxRejectedReports) m_rejectedReports.removeFirst();
+
+    const QJsonObject stats = root.value("stats").toObject();
+    m_reportAcceptedTotal = static_cast<qint64>(stats.value("accepted_total").toDouble(0));
+    m_reportRetryTotal = static_cast<qint64>(stats.value("retry_total").toDouble(0));
+    m_reportRejectedTotal = static_cast<qint64>(stats.value("rejected_total").toDouble(0));
+    m_reportDroppedTotal = static_cast<qint64>(stats.value("dropped_total").toDouble(0));
+    m_lastReportId = stats.value("last_report_id").toString();
+    m_lastReportPath = stats.value("last_report_path").toString();
+    m_lastReportResult = stats.value("last_result").toString();
+    m_lastReportError = stats.value("last_error").toString();
+    m_lastReportOkAt = stats.value("last_ok_at").toString();
+    m_lastReportAckId = stats.value("last_ack_id").toString();
+    trimPendingReportsToByteLimit();
+}
+
+void BackendClient::scheduleReportQueueSave() {
+    m_reportQueueDirty = true;
+    if (!m_reportSaveTimer.isActive()) m_reportSaveTimer.start();
+}
+
+void BackendClient::saveReportQueue() {
+    if (m_reportQueuePath.trimmed().isEmpty()) return;
+
+    auto serialize = [](const QueuedReport &report) {
+        QJsonObject object;
+        object.insert("id", report.id);
+        object.insert("path", report.path);
+        object.insert("body", report.body);
+        object.insert("attempts", report.attempts);
+        object.insert("created_at_ms", static_cast<double>(report.createdAtMs));
+        object.insert("next_attempt_ms", static_cast<double>(report.nextAttemptMs));
+        object.insert("last_error", report.lastError);
+        return object;
+    };
+
+    QJsonArray pending;
+    for (const QueuedReport &report : m_pendingReports) {
+        if (isDurableReportPath(report.path)) pending.append(serialize(report));
+    }
+    QJsonArray rejected;
+    for (const QueuedReport &report : m_rejectedReports) rejected.append(serialize(report));
+
+    QJsonObject stats;
+    stats.insert("accepted_total", static_cast<double>(m_reportAcceptedTotal));
+    stats.insert("retry_total", static_cast<double>(m_reportRetryTotal));
+    stats.insert("rejected_total", static_cast<double>(m_reportRejectedTotal));
+    stats.insert("dropped_total", static_cast<double>(m_reportDroppedTotal));
+    stats.insert("last_report_id", m_lastReportId);
+    stats.insert("last_report_path", m_lastReportPath);
+    stats.insert("last_result", m_lastReportResult);
+    stats.insert("last_error", m_lastReportError);
+    stats.insert("last_ok_at", m_lastReportOkAt);
+    stats.insert("last_ack_id", m_lastReportAckId);
+
+    QJsonObject root;
+    root.insert("schema", kReportQueueSchema);
+    root.insert("updated_at", backendNowBjText());
+    root.insert("pending", pending);
+    root.insert("rejected", rejected);
+    root.insert("stats", stats);
+
+    QDir().mkpath(QFileInfo(m_reportQueuePath).absolutePath());
+    QSaveFile file(m_reportQueuePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        m_reportQueuePersistOk = false;
+        m_reportQueuePersistError = file.errorString();
+        return;
+    }
+    // This is an internal recovery queue; compact JSON materially reduces
+    // eMMC writes and the amount of space used by base64 payloads.
+    file.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
+    if (!file.commit()) {
+        m_reportQueuePersistOk = false;
+        m_reportQueuePersistError = file.errorString();
+        return;
+    }
+    m_reportQueueDirty = false;
+    m_reportQueuePersistOk = true;
+    m_reportQueuePersistError.clear();
+}
+
+void BackendClient::pingOnce() {
+    if (m_pingInFlight) return;
+    if (!m_baseUrl.isValid() || m_baseUrl.host().isEmpty()) {
+        m_lastTestAt = backendNowBjText();
+        m_lastLatencyMs = -1;
+        setOk(false, "no_base_url");
+        return;
+    }
+
+    const QUrl requestBase = m_baseUrl;
+    const qint64 startedMs = QDateTime::currentMSecsSinceEpoch();
+    QNetworkRequest request(endpointUrl(requestBase, "/api/ping"));
+    request.setHeader(QNetworkRequest::UserAgentHeader, "rk3568-gui");
+    QNetworkReply *reply = m_nam.get(request);
+    reply->setParent(this);
+    m_pingInFlight = true;
+    QTimer::singleShot(m_reportTimeoutMs, reply, [reply]() {
+        if (reply->isRunning()) reply->abort();
+    });
+    connect(reply, &QNetworkReply::finished, this, [this, reply, requestBase, startedMs]() {
+        const int httpCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QByteArray data = reply->isOpen() ? reply->readAll()
+                                                : QByteArray();
+        const QString error = reply->error() == QNetworkReply::NoError
+                                  ? QString()
+                                  : reply->errorString();
+        reply->deleteLater();
+        m_pingInFlight = false;
+        if (requestBase != m_baseUrl) {
+            QTimer::singleShot(0, this, &BackendClient::pingOnce);
+            return;
+        }
+
+        m_lastTestAt = backendNowBjText();
+        m_lastLatencyMs = static_cast<int>(std::max<qint64>(
+            0, QDateTime::currentMSecsSinceEpoch() - startedMs));
+        if (!error.isEmpty() && httpCode == 0) {
+            setOk(false, error);
+            ++m_failStreak;
+            rotateCandidate();
+            return;
+        }
+        if (httpCode < 200 || httpCode >= 300) {
+            setOk(false, QString("HTTP %1").arg(httpCode));
+            ++m_failStreak;
+            rotateCandidate();
+            return;
+        }
+        QJsonParseError parseError;
+        const QJsonDocument document = QJsonDocument::fromJson(data, &parseError);
+        if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+            setOk(false, "bad_json");
+            ++m_failStreak;
+            rotateCandidate();
+            return;
+        }
+        if (document.object().value("ok").toBool(false)) {
+            m_lastOkAt = m_lastTestAt;
+            setOk(true, QString());
+            if (m_source != "auto") m_baseLocked = true;
+            m_failStreak = 0;
+            processReportQueue();
+            return;
+        }
+        setOk(false, "bad_response");
+        ++m_failStreak;
+        rotateCandidate();
+    });
+}
+
+QJsonObject BackendClient::reportDeliveryJson() const {
+    int durablePending = 0;
+    qint64 pendingBytes = 0;
+    for (const QueuedReport &report : m_pendingReports) {
+        if (isDurableReportPath(report.path)) {
+            ++durablePending;
+            pendingBytes += queuedReportBytes(report);
+        }
+    }
+
+    QJsonObject object;
+    object.insert("schema", kReportQueueSchema);
+    object.insert("semantics", "at_least_once");
+    object.insert("idempotency_field", "event_id");
+    object.insert("queue_path", m_reportQueuePath);
+    object.insert("pending_count", m_pendingReports.size());
+    object.insert("durable_pending_count", durablePending);
+    object.insert("pending_bytes", static_cast<double>(pendingBytes));
+    object.insert("rejected_saved_count", m_rejectedReports.size());
+    object.insert("in_flight", m_reportInFlight);
+    object.insert("queue_capacity", m_maxPendingReports);
+    object.insert("queue_capacity_bytes",
+                  static_cast<double>(m_maxPendingReportBytes));
+    object.insert("request_timeout_ms", m_reportTimeoutMs);
+    object.insert("queue_persist_ok", m_reportQueuePersistOk);
+    if (!m_reportQueuePersistError.isEmpty()) {
+        object.insert("queue_persist_error", m_reportQueuePersistError);
+    }
+    object.insert("accepted_total", static_cast<double>(m_reportAcceptedTotal));
+    object.insert("retry_total", static_cast<double>(m_reportRetryTotal));
+    object.insert("rejected_total", static_cast<double>(m_reportRejectedTotal));
+    object.insert("dropped_total", static_cast<double>(m_reportDroppedTotal));
+    object.insert("last_http_status", m_lastReportHttpStatus);
+    object.insert("last_report_id", m_lastReportId);
+    object.insert("last_report_path", m_lastReportPath);
+    object.insert("last_result", m_lastReportResult);
+    object.insert("last_error", m_lastReportError);
+    object.insert("last_attempt_at", m_lastReportAttemptAt);
+    object.insert("last_ok_at", m_lastReportOkAt);
+    object.insert("last_ack_id", m_lastReportAckId);
+    return object;
+}
+
+QJsonObject BackendClient::statusJson() const {
+    QJsonObject object;
+    object.insert("backend_base", m_baseUrl.isValid() ? backendBaseToString(m_baseUrl) : QString());
+    object.insert("backend_source", m_source);
+    object.insert("backend_ok", m_ok);
+    if (m_lastLatencyMs >= 0) object.insert("backend_latency_ms", m_lastLatencyMs);
+    object.insert("backend_error", m_lastError);
+    if (!m_lastOkAt.isEmpty()) object.insert("backend_last_ok_at", m_lastOkAt);
+    if (!m_lastTestAt.isEmpty()) object.insert("backend_last_test_at", m_lastTestAt);
+    const QJsonObject delivery = reportDeliveryJson();
+    object.insert("report_delivery", delivery);
+    object.insert("report_pending_count", delivery.value("pending_count"));
+    object.insert("report_rejected_count", delivery.value("rejected_saved_count"));
+    object.insert("report_last_result", delivery.value("last_result"));
+    object.insert("report_last_error", delivery.value("last_error"));
+    return object;
+}
+
+void BackendClient::setOk(bool ok, const QString &error) {
+    if (m_ok == ok && m_lastError == error) return;
+    m_ok = ok;
+    m_lastError = error;
+    emit statusChanged(m_ok, m_lastError);
+}
+
+void BackendClient::rotateCandidate() {
+    if (m_baseLocked || m_candidates.size() <= 1) return;
+    m_candidateIndex = (m_candidateIndex + 1) % m_candidates.size();
+    const QUrl next = m_candidates.value(m_candidateIndex);
+    if (next == m_baseUrl) return;
+    m_baseUrl = next;
+    m_source = "auto";
+    emit baseUrlChanged(m_baseUrl);
+    if (m_failStreak % m_candidates.size() != 0) {
+        QTimer::singleShot(0, this, &BackendClient::pingOnce);
+    }
+}

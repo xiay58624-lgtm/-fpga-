@@ -1,0 +1,3726 @@
+#include "MainWindow.h"
+#include "BackendSettings.h"
+#include "PlateCategory.h"
+#include "PlateDetectorProfiles.h"
+#include "PlateRecognizerProfiles.h"
+#include "PlateEvaluator.h"
+#include "LatestFramePolicy.h"
+#include "yolo.h"
+#include "generic_yolo.h"
+#include "AdasModelSet.h"
+#include <QApplication>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QLabel>
+#include <QPixmap>
+#include <QTimer>
+#include <QLineEdit>
+#include <QMenu>
+#include <QSlider>
+#include <QSpinBox>
+#include <QDoubleSpinBox>
+#include <QTabWidget>
+#include <QComboBox>
+#include <QCheckBox>
+#include <QScrollArea>
+#include <QGridLayout>
+#include <QPushButton>
+#include <QFontMetrics>
+#include <QFile>
+#include <QFileDialog>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QJsonValue>
+#include <QDateTime>
+#include <QMessageBox>
+#include <QDir>
+#include <QTextStream>
+#include <QPoint>
+#include <QTimeZone>
+#include <QProcess>
+#include <QProcessEnvironment>
+#include <QProgressBar>
+#include <QFileInfo>
+#include <QRegularExpression>
+#include <QStringList>
+#include <QUrl>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QtGlobal>
+#include <QBuffer>
+#include <QVariant>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPen>
+#include <QFrame>
+#include <QColor>
+#include <QSignalBlocker>
+#include <algorithm>
+#include <cmath>
+#include <utility>
+#include <vector>
+#include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
+#include "DriverStatusDialog.h"
+#include "DriverStatusCollector.h"
+#include "ApiServer.h"
+#include "BackendClient.h"
+#include "TtsWavPlayer.h"
+#include "UserMessageCloudSync.h"
+#include "UiSizing.h"
+#include "GpuVideoWidget.h"
+
+static QString nowBjText() {
+    QTimeZone tz("Asia/Shanghai");
+    return QDateTime::currentDateTimeUtc().toTimeZone(tz).toString("yyyy-MM-dd HH:mm:ss");
+}
+
+static double confToPercent(double conf) {
+    double pct = conf <= 1.0 ? conf * 100.0 : conf;
+    return std::max(0.0, std::min(100.0, pct));
+}
+
+static QString confPercentText(double conf) {
+    if (!std::isfinite(conf)) return QString("—");
+    return QString("%1%").arg(confToPercent(conf), 0, 'f', 1);
+}
+
+static void drawRoadDirection(QPainter &painter, const QRect &tile,
+                              int direction, const QColor &color) {
+    if (tile.isEmpty() || direction < 0 || direction > 5) return;
+    const int side = std::max(42, std::min(58, tile.height() / 5));
+    const QPoint center = tile.center();
+    const qreal scale = side / 58.0;
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(color, 2));
+    painter.setBrush(QColor(8, 16, 20, 210));
+    painter.drawEllipse(center, side / 2, side / 2);
+    painter.translate(center);
+    if (direction == 3) {
+        painter.setPen(Qt::white);
+        painter.setFont(QFont(QStringLiteral("Sans"), 8, QFont::Bold));
+        painter.drawText(QRect(-side / 2, -10, side, 20), Qt::AlignCenter,
+                         QStringLiteral("STOP"));
+    } else {
+        if (direction == 1) painter.rotate(-90);
+        else if (direction == 2) painter.rotate(90);
+        else if (direction == 4) painter.rotate(-45);
+        else if (direction == 5) painter.rotate(45);
+        painter.scale(scale, scale);
+        QPainterPath arrow;
+        arrow.moveTo(0, -22);
+        arrow.lineTo(15, -4);
+        arrow.lineTo(6, -4);
+        arrow.lineTo(6, 18);
+        arrow.lineTo(-6, 18);
+        arrow.lineTo(-6, -4);
+        arrow.lineTo(-15, -4);
+        arrow.closeSubpath();
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(color);
+        painter.drawPath(arrow);
+    }
+    painter.restore();
+}
+
+static QString targetDeviceIdForSource(int source) {
+    const QString specificName = QString("RK3568_SRC%1_TARGET_DEVICE_ID").arg(source);
+    const QByteArray specific = qgetenv(specificName.toLocal8Bit().constData()).trimmed();
+    if (!specific.isEmpty()) return QString::fromLocal8Bit(specific).trimmed();
+    const QByteArray csv = qgetenv("RK3568_TARGET_DEVICE_IDS").trimmed();
+    if (!csv.isEmpty()) {
+        const QStringList parts = QString::fromLocal8Bit(csv).split(',', Qt::KeepEmptyParts);
+        if (source >= 1 && source <= parts.size()) return parts.at(source - 1).trimmed();
+    }
+    return QString::fromLocal8Bit(qgetenv("RK3568_TARGET_DEVICE_ID")).trimmed();
+}
+
+static QString targetDeviceIdForSource(int source, const RuntimeSettingsData &settings) {
+    const QString mapped = targetDeviceIdForSource(source);
+    return mapped.isEmpty() ? settings.targetDeviceId.trimmed() : mapped;
+}
+
+static QString targetMacForSource(int source) {
+    const QString specificName = QString("RK3568_SRC%1_TARGET_MAC").arg(source);
+    const QByteArray specific = qgetenv(specificName.toLocal8Bit().constData()).trimmed();
+    if (!specific.isEmpty()) return QString::fromLocal8Bit(specific).trimmed();
+    const QByteArray csv = qgetenv("RK3568_TARGET_MACS").trimmed();
+    if (!csv.isEmpty()) {
+        const QStringList parts = QString::fromLocal8Bit(csv).split(',', Qt::KeepEmptyParts);
+        if (source >= 1 && source <= parts.size()) return parts.at(source - 1).trimmed();
+    }
+    return QString::fromLocal8Bit(qgetenv("RK3568_TARGET_MAC")).trimmed();
+}
+
+static void readProcModules(bool &moduleOk) {
+    moduleOk = false;
+    QFile f("/proc/modules");
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return;
+    QTextStream ts(&f);
+    while (!ts.atEnd()) {
+        const QString line = ts.readLine().trimmed();
+        if (line.startsWith("pango_pci_driver ")) {
+            moduleOk = true;
+            return;
+        }
+    }
+}
+
+static bool hasBoundPciDevice(const QString &drvName) {
+    QDir d("/sys/bus/pci/drivers/" + drvName);
+    if (!d.exists()) return false;
+    const QStringList ents = d.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    static const QRegularExpression bdfRe(R"(^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$)");
+    for (const QString &e : ents) {
+        if (bdfRe.match(e).hasMatch()) return true;
+    }
+    return false;
+}
+
+static void readPcieState(bool &nodeOk, QString &nodePath, bool &moduleOk, bool &boundOk) {
+    nodePath = QString::fromUtf8(qgetenv("PCIE_DEV_NODE")).trimmed();
+    if (nodePath.isEmpty()) nodePath = "/dev/pango_pci_driver";
+    nodeOk = QFileInfo::exists(nodePath);
+    readProcModules(moduleOk);
+    boundOk = hasBoundPciDevice("pango_pci_driver");
+}
+
+class ElidedLabel : public QLabel {
+public:
+    explicit ElidedLabel(QWidget *parent = nullptr) : QLabel(parent) {}
+    void setFullText(const QString &t) { m_full = t; updateElide(); }
+protected:
+    void resizeEvent(QResizeEvent *e) override {
+        QLabel::resizeEvent(e);
+        updateElide();
+    }
+private:
+    void updateElide() {
+        if (m_full.isEmpty()) return;
+        QFontMetrics fm(font());
+        QString el = fm.elidedText(m_full, Qt::ElideRight, std::max(0, width() - 2));
+        QLabel::setText(el);
+        QLabel::setToolTip(m_full);
+    }
+    QString m_full;
+};
+// --- 构造函数 ---
+MainWindow::MainWindow(BusinessSystem system, bool developerMode, QWidget *parent)
+    : QMainWindow(parent), m_isCapturing(false), 
+      m_currentTheme(AppTheme::Dark), m_currentConf(0.25f),
+      m_mosaicMapping{1, 2, 3, 4}, m_businessDlg(nullptr), m_businessSystem(system), m_developerMode(developerMode) {
+    const bool compact720 = UiSizing::isCompact720(this);
+    m_runtimeSettings = loadRuntimeSettings();
+    m_runtimeSettings.globalInferenceEnabled = false;
+    applyRuntimeSettingsToProcess(m_runtimeSettings);
+    m_currentTheme = (AppTheme)m_runtimeSettings.theme;
+    m_currentConf = m_runtimeSettings.plateConf;
+    if (m_runtimeSettings.algoMode == 1) m_algoMode = CaptureThread::AlgoMode::EnvOnly;
+    else if (m_runtimeSettings.algoMode == 2) m_algoMode = CaptureThread::AlgoMode::Overlay;
+    else m_algoMode = CaptureThread::AlgoMode::PlateOnly;
+    qInfo().noquote() << QString("RK_MODE startup=%1")
+        .arg(m_algoMode == CaptureThread::AlgoMode::EnvOnly
+                 ? QStringLiteral("environment")
+                 : m_algoMode == CaptureThread::AlgoMode::Overlay
+                       ? QStringLiteral("overlay")
+                       : QStringLiteral("plate"));
+
+    applyTheme(m_currentTheme);
+
+    QWidget *centralWidget = new QWidget(this);
+    QVBoxLayout *mainLayout = new QVBoxLayout(centralWidget);
+    mainLayout->setContentsMargins(compact720 ? 6 : 10, compact720 ? 6 : 10,
+                                   compact720 ? 6 : 10, compact720 ? 6 : 10);
+    mainLayout->setSpacing(compact720 ? 6 : 8);
+
+    QWidget *topBar = new QWidget(centralWidget);
+    topBar->setFixedHeight(compact720 ? 34 : 44);
+    QHBoxLayout *topL = new QHBoxLayout(topBar);
+    topL->setContentsMargins(compact720 ? 4 : 8, 0, compact720 ? 4 : 8, 0);
+    topL->setSpacing(compact720 ? 4 : 6);
+
+    QString appTitle = "RK3568 智能驾驶视觉系统";
+    QLabel *title = new QLabel(appTitle, topBar);
+    QFont titleFont("WenQuanYi Zen Hei");
+    titleFont.setPixelSize(compact720 ? 16 : 20);
+    titleFont.setBold(true);
+    title->setFont(titleFont);
+
+    m_clockLabel = new QLabel(topBar);
+    m_clockLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_clockLabel->setFixedWidth(compact720 ? 150 : 280);
+
+    m_backendCommLabel = new QLabel("后端：未连接", topBar);
+    m_backendCommLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_backendCommLabel->setFixedWidth(compact720 ? 105 : 180);
+
+    m_parkingBtn = new QPushButton("360°融合", topBar);
+    m_parkingBtn->setFixedWidth(compact720 ? 78 : 110);
+    m_etcBtn = new QPushButton("ETC", topBar);
+    m_etcBtn->setFixedWidth(compact720 ? 48 : 80);
+    m_perfBtn = new QPushButton("耗时", topBar);
+    m_perfBtn->setFixedWidth(compact720 ? 52 : 80);
+    m_driverBtn = new QPushButton("驱动", topBar);
+    m_driverBtn->setFixedWidth(compact720 ? 52 : 80);
+
+    m_switchBtn = new QPushButton("切换账号", topBar);
+    m_switchBtn->setFixedWidth(compact720 ? 72 : 110);
+
+    m_settingsBtn = new QPushButton("设置", topBar);
+    m_settingsBtn->setFixedWidth(compact720 ? 52 : 80);
+
+    topL->addWidget(title);
+    topL->addStretch();
+    topL->addWidget(m_parkingBtn);
+    topL->addWidget(m_etcBtn);
+    topL->addWidget(m_perfBtn);
+    topL->addWidget(m_driverBtn);
+    topL->addWidget(m_backendCommLabel);
+    topL->addWidget(m_clockLabel);
+    topL->addWidget(m_switchBtn);
+    topL->addWidget(m_settingsBtn);
+    mainLayout->addWidget(topBar);
+
+    if (!developerMode) m_perfBtn->hide();
+
+    if (system == BusinessSystem::Parking) {
+        m_etcBtn->hide();
+    } else {
+        m_parkingBtn->hide();
+    }
+
+    connect(m_driverBtn, &QPushButton::clicked, this, &MainWindow::openDriverStatus);
+
+    QWidget *mid = new QWidget(centralWidget);
+    QHBoxLayout *midL = new QHBoxLayout(mid);
+    midL->setContentsMargins(0, 0, 0, 0);
+    midL->setSpacing(compact720 ? 6 : 10);
+
+    m_videoLabel = new GpuVideoWidget(mid);
+    m_videoLabel->setObjectName("videoLabel");
+    m_videoLabel->setStatusText("等待采集...");
+
+    QWidget *rightPanel = new QWidget(mid);
+    rightPanel->setObjectName("rightPanel");
+    rightPanel->setFixedWidth(compact720 ? 320 : 520);
+    QVBoxLayout *rightL = new QVBoxLayout(rightPanel);
+    rightL->setContentsMargins(0, 0, 0, 0);
+    rightL->setSpacing(compact720 ? 5 : 8);
+
+    QLabel *rTitle = new QLabel(QStringLiteral("行驶判断"), rightPanel);
+    QFont rtFont("WenQuanYi Zen Hei");
+    rtFont.setPixelSize(compact720 ? 19 : 22);
+    rtFont.setBold(true);
+    rTitle->setFont(rtFont);
+
+    QWidget *rTools = new QWidget(rightPanel);
+    QVBoxLayout *rToolsL = new QVBoxLayout(rTools);
+    rToolsL->setContentsMargins(0, 0, 0, 0);
+    rToolsL->setSpacing(compact720 ? 3 : 6);
+
+    QWidget *fltRow = new QWidget(rTools);
+    QHBoxLayout *fltL = new QHBoxLayout(fltRow);
+    fltL->setContentsMargins(0, 0, 0, 0);
+    fltL->setSpacing(compact720 ? 3 : 6);
+    m_plateSourceFilter = new QComboBox(fltRow);
+    m_plateSourceFilter->addItems({"全部", "源1", "源2", "源3", "源4"});
+    m_plateSourceFilter->setFixedWidth(compact720 ? 62 : 90);
+    m_plateProvBox = new QComboBox(fltRow);
+    m_plateProvBox->addItems({"任意", "京", "沪", "津", "渝", "冀", "豫", "云", "辽", "黑", "湘", "皖", "鲁", "新", "苏", "浙", "赣", "鄂", "桂", "甘", "晋", "蒙", "陕", "吉", "闽", "贵", "粤", "青", "藏", "川", "宁", "琼"});
+    m_plateProvBox->setFixedWidth(compact720 ? 52 : 70);
+    m_plateSearch = new QLineEdit(fltRow);
+    m_plateSearch->setPlaceholderText("A12345...");
+    m_plateQueryBtn = new QPushButton("查询", fltRow);
+    m_plateQueryBtn->setFixedWidth(compact720 ? 48 : 60);
+    fltL->addWidget(m_plateSourceFilter);
+    fltL->addWidget(m_plateProvBox);
+    fltL->addWidget(m_plateSearch, 1);
+    fltL->addWidget(m_plateQueryBtn);
+
+    QWidget *saveRow = new QWidget(rTools);
+    QHBoxLayout *saveL = new QHBoxLayout(saveRow);
+    saveL->setContentsMargins(0, 0, 0, 0);
+    saveL->setSpacing(compact720 ? 3 : 6);
+    m_plateChooseDirBtn = new QPushButton("选择目录", saveRow);
+    m_plateChooseDirBtn->setText(compact720 ? "目录" : "选择目录");
+    m_plateChooseDirBtn->setFixedWidth(compact720 ? 54 : 90);
+    m_plateSaveBtn = new QPushButton("保存可见", saveRow);
+    m_plateSaveBtn->setText(compact720 ? "保存" : "保存可见");
+    m_plateSaveBtn->setFixedWidth(compact720 ? 54 : 90);
+    m_plateDirLabel = new QLabel("未选择", saveRow);
+    m_plateDirLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+    saveL->addWidget(m_plateChooseDirBtn);
+    saveL->addWidget(m_plateSaveBtn);
+    saveL->addWidget(m_plateDirLabel, 1);
+
+    {
+        QString imgDir = QString::fromLocal8Bit(qgetenv("RK3568_IMAGE_DIR"));
+        if (!imgDir.isEmpty()) {
+            m_plateSaveDir = imgDir;
+            if (m_plateDirLabel) m_plateDirLabel->setText(imgDir);
+        }
+    }
+
+    rToolsL->addWidget(fltRow);
+    rToolsL->addWidget(saveRow);
+
+    m_plateScroll = new QScrollArea(rightPanel);
+    m_plateScroll->setWidgetResizable(true);
+    m_plateScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_plateScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+
+    m_plateContainer = new QWidget();
+    m_plateListLayout = new QVBoxLayout(m_plateContainer);
+    m_plateListLayout->setContentsMargins(compact720 ? 4 : 6, compact720 ? 4 : 6,
+                                          compact720 ? 4 : 6, compact720 ? 4 : 6);
+    m_plateListLayout->setSpacing(compact720 ? 5 : 8);
+    m_plateListLayout->setAlignment(Qt::AlignTop);
+    m_plateScroll->setWidget(m_plateContainer);
+
+    rightL->addWidget(rTitle);
+    rightL->addWidget(rTools);
+    rightL->addWidget(m_plateScroll, 1);
+
+    // The legacy plate widgets stay allocated for compatibility with saved
+    // settings and report code, but the operator-facing panel is ADAS-first.
+    rTools->hide();
+    m_plateScroll->hide();
+    QWidget *roadPanel = new QWidget(rightPanel);
+    QVBoxLayout *roadLayout = new QVBoxLayout(roadPanel);
+    roadLayout->setContentsMargins(8, 8, 8, 8);
+    roadLayout->setSpacing(compact720 ? 5 : 8);
+    roadPanel->setStyleSheet(
+        "background:#17202a; border:1px solid #36434d; border-radius:3px;");
+
+    m_adasModelBox = new QCheckBox(QStringLiteral("ADAS"), roadPanel);
+    m_navigationModelBox = new QCheckBox(QStringLiteral("导航"), roadPanel);
+    m_adasModelBox->setObjectName(QStringLiteral("adasModelToggle"));
+    m_navigationModelBox->setObjectName(QStringLiteral("navigationModelToggle"));
+    for (QCheckBox *box : {m_adasModelBox, m_navigationModelBox}) {
+        box->setMinimumHeight(compact720 ? 38 : 48);
+        box->setStyleSheet(
+            "QCheckBox{color:#edf4f6;spacing:10px;font-size:19px;font-weight:600;}"
+            "QCheckBox::indicator{width:24px;height:24px;}");
+    }
+    roadLayout->addWidget(m_adasModelBox);
+    m_adasOptionsPanel = new QWidget(roadPanel);
+    m_adasOptionsPanel->setObjectName(QStringLiteral("adasModelOptions"));
+    auto *adasOptions = new QGridLayout(m_adasOptionsPanel);
+    adasOptions->setContentsMargins(14, 0, 0, 0);
+    adasOptions->setSpacing(compact720 ? 3 : 5);
+    m_adasLightsBox = new QCheckBox(QStringLiteral("红绿灯"), m_adasOptionsPanel);
+    m_adasLinesBox = new QCheckBox(QStringLiteral("交通线"), m_adasOptionsPanel);
+    m_adasVehiclesBox = new QCheckBox(QStringLiteral("行人及车辆"), m_adasOptionsPanel);
+    m_adasAllBox = new QCheckBox(QStringLiteral("全选"), m_adasOptionsPanel);
+    m_adasLightsBox->setObjectName(QStringLiteral("adasLightsToggle"));
+    m_adasLinesBox->setObjectName(QStringLiteral("adasLinesToggle"));
+    m_adasVehiclesBox->setObjectName(QStringLiteral("adasVehiclesToggle"));
+    m_adasAllBox->setObjectName(QStringLiteral("adasAllToggle"));
+    int optionIndex = 0;
+    for (QCheckBox *box : {m_adasLightsBox, m_adasLinesBox, m_adasVehiclesBox, m_adasAllBox}) {
+        box->setChecked(true);
+        box->setMinimumHeight(compact720 ? 28 : 34);
+        box->setStyleSheet(
+            "QCheckBox{color:#edf4f6;spacing:6px;font-size:17px;border:0;}"
+            "QCheckBox::indicator{width:22px;height:22px;}");
+        adasOptions->addWidget(box, optionIndex / 2, optionIndex % 2);
+        ++optionIndex;
+    }
+    m_adasOptionsPanel->setVisible(false);
+    roadLayout->addWidget(m_adasOptionsPanel);
+    roadLayout->addWidget(m_navigationModelBox);
+
+    m_roadModelStatusLabel = new QLabel(QStringLiteral("未选择驾驶模式"), roadPanel);
+    m_roadModelStatusLabel->setObjectName(QStringLiteral("roadModeStatus"));
+    m_roadModelStatusLabel->setWordWrap(true);
+    m_roadModelStatusLabel->setMinimumHeight(compact720 ? 34 : 42);
+    m_roadModelStatusLabel->setStyleSheet(
+        "color:#63e6be; background:#102b27; border:1px solid #286b59;"
+        "border-radius:3px; padding:5px 8px; font-size:20px; font-weight:700;");
+    roadLayout->addWidget(m_roadModelStatusLabel);
+
+    QLabel *roadRuleFlow = new QLabel(
+        QStringLiteral("判断顺序：信号灯优先，其次车道线，最后按控制台方向"), roadPanel);
+    roadRuleFlow->setWordWrap(true);
+    roadRuleFlow->setStyleSheet(
+        "color:#a9bbc4; border:0; font-size:15px; padding:2px 2px;");
+    roadLayout->addWidget(roadRuleFlow);
+
+    m_roadDecisionLabel = new QLabel(QStringLiteral("请选择 ADAS 或导航模式"), roadPanel);
+    m_roadDecisionLabel->setObjectName(QStringLiteral("roadDecisionLabel"));
+    m_roadDecisionLabel->setWordWrap(true);
+    m_roadDecisionLabel->setMinimumHeight(compact720 ? 72 : 92);
+    m_roadDecisionLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    m_roadDecisionLabel->setStyleSheet(
+        "color:#e7edf0; background:#202a31; border:1px solid #46545d;"
+        "border-radius:3px; padding:8px; font-size:17px;");
+    roadLayout->addWidget(m_roadDecisionLabel);
+
+    QFrame *turnDivider = new QFrame(roadPanel);
+    turnDivider->setFrameShape(QFrame::HLine);
+    roadLayout->addWidget(turnDivider);
+    QLabel *turnTitle = new QLabel(QStringLiteral("控制台"), roadPanel);
+    turnTitle->setStyleSheet("color:#edf4f6; font-size:21px; font-weight:700; border:0;");
+    roadLayout->addWidget(turnTitle);
+
+    QWidget *turnPad = new QWidget(roadPanel);
+    QGridLayout *turnGrid = new QGridLayout(turnPad);
+    turnGrid->setContentsMargins(0, 2, 0, 0);
+    turnGrid->setHorizontalSpacing(compact720 ? 7 : 10);
+    turnGrid->setVerticalSpacing(compact720 ? 5 : 8);
+    auto addTurnButton = [this, turnPad, turnGrid, compact720](
+            int row, int column, const QString &glyph, const QString &tip,
+            TurnDirection direction) {
+        auto *button = new QPushButton(glyph, turnPad);
+        button->setCheckable(true);
+        button->setAutoExclusive(true);
+        button->setFixedSize(compact720 ? 72 : 92, compact720 ? 56 : 68);
+        button->setToolTip(tip);
+        button->setAccessibleName(tip);
+        button->setStyleSheet(
+            "QPushButton{background:#28343d;color:#e8eef0;border:1px solid #65747d;"
+            "border-radius:3px;font-size:36px;font-weight:700;}"
+            "QPushButton:checked{background:#168456;border:2px solid #48d597;color:white;}"
+            "QPushButton:hover{background:#354a56;}");
+        turnGrid->addWidget(button, row, column, Qt::AlignCenter);
+        connect(button, &QPushButton::clicked, this,
+                [this, direction]() { setTurnCardDirection(direction); });
+    };
+    addTurnButton(0, 0, QStringLiteral("←"), QStringLiteral("左转"), TurnDirection::Left);
+    addTurnButton(0, 1, QStringLiteral("↑"), QStringLiteral("直行"), TurnDirection::Straight);
+    addTurnButton(0, 2, QStringLiteral("→"), QStringLiteral("右转"), TurnDirection::Right);
+    addTurnButton(1, 0, QStringLiteral("↖"), QStringLiteral("左变道（P4）"), TurnDirection::LaneLeft);
+    addTurnButton(1, 1, QStringLiteral("↓"), QStringLiteral("停止"), TurnDirection::Stop);
+    addTurnButton(1, 2, QStringLiteral("↗"), QStringLiteral("右变道（P5）"), TurnDirection::LaneRight);
+    roadLayout->addWidget(turnPad, 0, Qt::AlignHCenter);
+
+    rTitle->setText(QStringLiteral("行驶判断"));
+    rightL->addWidget(rTitle);
+    rightL->addWidget(roadPanel);
+
+    midL->addWidget(m_videoLabel, 1);
+    midL->addWidget(rightPanel, 0, Qt::AlignTop);
+    mainLayout->addWidget(mid, 1);
+
+    // 底部状态栏
+    QWidget *bottomBar = new QWidget(centralWidget);
+    bottomBar->setFixedHeight(compact720 ? 66 : 55);
+    QVBoxLayout *bottomLayout = new QVBoxLayout(bottomBar);
+    bottomLayout->setContentsMargins(compact720 ? 6 : 20, 0,
+                                     compact720 ? 6 : 20, 0);
+    bottomLayout->setSpacing(compact720 ? 1 : 0);
+    QWidget *statusRow = new QWidget(bottomBar);
+    QHBoxLayout *statusLayout = new QHBoxLayout(statusRow);
+    statusLayout->setContentsMargins(0, 0, 0, 0);
+    statusLayout->setSpacing(compact720 ? 5 : 6);
+    QWidget *controlRow = compact720 ? new QWidget(bottomBar) : statusRow;
+    QHBoxLayout *barLayout = compact720
+        ? new QHBoxLayout(controlRow) : statusLayout;
+    if (compact720) {
+        barLayout->setContentsMargins(0, 0, 0, 0);
+        barLayout->setSpacing(4);
+    }
+
+    m_fpsLabel = new QLabel("道路推理FPS: 0.00", bottomBar);
+    m_fpsLabel->setToolTip(
+        "ADAS/导航使用异步推理，帧率按四路整轮完成次数统计；画面持续采集。");
+    m_statusLabel = new ElidedLabel(bottomBar);
+    m_statusLabel->setMinimumWidth(compact720 ? 160 : 380);
+    m_statusLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+    m_statusLabel->setText("就绪");
+    m_statusLabel->hide();
+    m_modelLabel = new ElidedLabel(bottomBar);
+    m_modelLabel->setMinimumWidth(compact720 ? 190 : 240);
+    m_modelLabel->setMaximumWidth(compact720 ? 300 : 420);
+    m_modelLabel->hide();
+    static_cast<ElidedLabel *>(m_modelLabel)->setFullText(
+        QString("模型: %1 | OCR: %2")
+            .arg(yolo_current_detector_model_name())
+            .arg(yolo_current_recognizer_model_name()));
+    QLabel *inputLabel = new QLabel("输入:", bottomBar);
+    m_inputModeBox = new QComboBox(bottomBar);
+    m_inputModeBox->addItems({"PCIE", "SD卡"});
+    m_inputModeBox->setFixedWidth(compact720 ? 72 : 88);
+    m_sdImportBtn = new QPushButton("SD导入", bottomBar);
+    m_sdImportBtn->setFixedWidth(compact720 ? 72 : 88);
+    m_videoImportBtn = new QPushButton("四路视频", bottomBar);
+    m_videoImportBtn->setFixedWidth(compact720 ? 76 : 92);
+    m_inputInfoLabel = new ElidedLabel(bottomBar);
+    m_inputInfoLabel->setMinimumWidth(compact720 ? 85 : 180);
+    if (compact720) m_inputInfoLabel->setMaximumWidth(125);
+    static_cast<ElidedLabel*>(m_inputInfoLabel)->setFullText("PCIe实时采集");
+    QLabel *viewLabel = new QLabel("显示:", bottomBar);
+    m_viewModeBox = new QComboBox(bottomBar);
+    m_viewModeBox->addItems({"拼接-原始(4路)", "单路-源1", "单路-源2", "单路-源3", "单路-源4", "拼接-自定义"});
+    m_viewModeBox->setFixedWidth(compact720 ? 122 : 140);
+    m_mosaicCfgBtn = new QPushButton("拼接设置", bottomBar);
+    m_mosaicCfgBtn->setFixedWidth(compact720 ? 86 : 100);
+    m_mosaicCfgBtn->setEnabled(false);
+
+    m_controlBtn = new QPushButton("开始采集", bottomBar);
+    m_controlBtn->setFixedWidth(compact720 ? 104 : 130);
+
+    statusLayout->addWidget(m_fpsLabel);
+    statusLayout->addStretch();
+    barLayout->addWidget(inputLabel);
+    barLayout->addWidget(m_inputModeBox);
+    barLayout->addWidget(m_sdImportBtn);
+    barLayout->addWidget(m_videoImportBtn);
+    barLayout->addWidget(m_inputInfoLabel);
+    barLayout->addSpacing(compact720 ? 4 : 10);
+    barLayout->addWidget(viewLabel);
+    barLayout->addWidget(m_viewModeBox);
+    barLayout->addWidget(m_mosaicCfgBtn);
+    barLayout->addStretch();
+    barLayout->addWidget(m_controlBtn);
+
+    if (compact720) {
+        bottomLayout->addWidget(statusRow, 1);
+        bottomLayout->addWidget(controlRow, 1);
+    } else {
+        bottomLayout->addWidget(statusRow);
+    }
+
+    mainLayout->addWidget(bottomBar);
+    setCentralWidget(centralWidget);
+
+    // 初始化采集线程
+    m_captureThread = new CaptureThread(this);
+    static_cast<ElidedLabel *>(m_modelLabel)->setFullText(
+        QString("模型: %1 | OCR: %2")
+            .arg(yolo_current_detector_model_name())
+            .arg(yolo_current_recognizer_model_name()));
+    m_captureThread->setInputMode(m_inputMode);
+    m_captureThread->setSdImageIntervalSeconds(m_runtimeSettings.sdImageIntervalSec);
+    m_captureThread->setGlobalInferenceEnabled(
+        m_runtimeSettings.globalInferenceEnabled);
+    connect(m_captureThread, &CaptureThread::frameReady, this, &MainWindow::updateFrame);
+    connect(m_captureThread, &CaptureThread::captureFailed, this,
+            [this](const QString &error) {
+        m_isCapturing = false;
+        configureRoadMode();
+        if (m_controlBtn) {
+            m_controlBtn->setEnabled(true);
+            m_controlBtn->setText("开始采集");
+        }
+        if (m_videoLabel) {
+            m_videoLabel->setStatusText(QString("采集失败\n%1").arg(error));
+        }
+        postStatus("", true);
+    });
+    connect(m_captureThread, &QThread::finished, this, [this]() {
+        if (m_captureThread && m_captureThread->isRunning()) return;
+        m_isCapturing = false;
+        configureRoadMode();
+        if (m_controlBtn) {
+            m_controlBtn->setEnabled(true);
+            m_controlBtn->setText("开始采集");
+        }
+        postStatus("", true);
+    });
+    connect(m_captureThread, &CaptureThread::fpsUpdate, this, &MainWindow::updateFps);
+    connect(m_captureThread, &CaptureThread::perfUpdate, this, [this](const QString& text) {
+        if (m_statusLabel) {
+            static_cast<ElidedLabel*>(m_statusLabel)->setFullText(text);
+        }
+    });
+    connect(m_captureThread, &CaptureThread::perfParts, this, [this](double capMs, double convMs, double viewMs,
+                                                                    double detBoxMs, double detOcrMs, double envMs,
+                                                                    double uiMs, double totalMs, quint64 pcieRxFrames,
+                                                                    bool slidingEnabled, int slidingWindowCount) {
+        if (m_perfDlg) {
+            m_perfDlg->setParts(capMs, convMs, viewMs, detBoxMs, detOcrMs,
+                                envMs, uiMs, totalMs, slidingEnabled,
+                                slidingWindowCount);
+        }
+        m_lastPcieRxFrames = pcieRxFrames;
+        if (m_perfDlg) {
+            const DriverCaptureMetrics capture = currentDriverCaptureMetrics();
+            m_perfDlg->setPcieMetrics(m_lastPcieRxFrames, capture.actualRxFps,
+                                      capture.frameIntervalMs, capture.dmaWaitMs,
+                                      capture.frameV2);
+        }
+        m_lastCaptureMs = capMs;
+        m_lastConvMs = convMs;
+        m_lastViewMs = viewMs;
+        m_lastDetMs = detBoxMs;
+        m_lastOcrMs = detOcrMs;
+        m_lastEnvMs = envMs;
+        const double inferMs = detBoxMs + detOcrMs + envMs;
+        m_lastInferMs = inferMs > 0 ? inferMs : 0.0;
+        m_lastUiMs = uiMs;
+        m_lastDispMs = viewMs + uiMs;
+        m_lastTotalMs = totalMs;
+    });
+    connect(m_captureThread, &CaptureThread::perfDetParts, this, [this](double preMs, double npuMs, double postMs) {
+        if (m_perfDlg) m_perfDlg->setDetParts(preMs, npuMs, postMs);
+    });
+    connect(m_captureThread, &CaptureThread::perfDetRuntime, this,
+            [this](const QJsonObject &metrics) {
+        m_lastDetRuntimeMetrics = metrics;
+        if (m_perfDlg) m_perfDlg->setDetRuntime(metrics);
+        if (m_isCapturing) postStatus("", false);
+    });
+    connect(m_captureThread, &CaptureThread::plateReport, this, &MainWindow::onPlateReport);
+    m_ttsPlayer = new TtsWavPlayer(this);
+    connect(m_captureThread, &CaptureThread::violationReport, this, [this](QByteArray jpeg, QByteArray thumbJpeg, QString time, int viewMode, int singleSource, int q0, int q1, int q2, int q3, double iou) {
+        if (!m_backendClient) return;
+        QJsonObject o;
+        o.insert("time_bj", time);
+        o.insert("view_mode", viewMode);
+        o.insert("single_source", singleSource);
+        o.insert("q0", q0);
+        o.insert("q1", q1);
+        o.insert("q2", q2);
+        o.insert("q3", q3);
+        o.insert("overlap_iou", iou);
+        o.insert("image_jpeg_base64", QString::fromLatin1(jpeg.toBase64()));
+        o.insert("thumb_jpeg_base64", QString::fromLatin1(thumbJpeg.toBase64()));
+        m_backendClient->postJson("/api/rk/report/violation", o);
+    });
+    connect(m_controlBtn, &QPushButton::clicked, this, &MainWindow::handleStartStop);
+    connect(m_settingsBtn, &QPushButton::clicked, this, &MainWindow::openSettings);
+    // Telemetry carries the configuration generation as well as the decision.
+    // Use it to reject results queued before changing mode/model selection.
+    connect(m_captureThread, &CaptureThread::roadInferenceTelemetry,
+            this, &MainWindow::handleRoadInferenceTelemetry);
+    connect(m_captureThread, &CaptureThread::roadInferenceError,
+            this, [this](const QString &message, quint64 configVersion) {
+        if (configVersion != m_expectedDisplayConfigVersion) return;
+        const bool adasFailed = m_adasModelBox && m_adasModelBox->isChecked();
+        const bool navigationFailed =
+            m_navigationModelBox && m_navigationModelBox->isChecked();
+        if (adasFailed)
+            m_adasModelBox->setChecked(false);
+        else if (navigationFailed)
+            m_navigationModelBox->setChecked(false);
+        if (m_roadModelStatusLabel) {
+            m_roadModelStatusLabel->setText(adasFailed
+                ? QStringLiteral("辅助驾驶异常")
+                : navigationFailed ? QStringLiteral("导航异常")
+                                   : QStringLiteral("识别异常"));
+        }
+        if (m_roadDecisionLabel) m_roadDecisionLabel->setText(message);
+    });
+    connect(m_adasModelBox, &QCheckBox::toggled, this, [this](bool enabled) {
+        if (enabled && m_navigationModelBox && m_navigationModelBox->isChecked()) {
+            const QSignalBlocker blocker(m_navigationModelBox);
+            m_navigationModelBox->setChecked(false);
+        }
+        configureRoadMode();
+    });
+    connect(m_navigationModelBox, &QCheckBox::toggled, this, [this](bool enabled) {
+        if (enabled && m_adasModelBox && m_adasModelBox->isChecked()) {
+            const QSignalBlocker blocker(m_adasModelBox);
+            m_adasModelBox->setChecked(false);
+        }
+        configureRoadMode();
+    });
+    connect(m_adasAllBox, &QCheckBox::clicked, this, [this](bool checked) {
+        for (QCheckBox *box : {m_adasLightsBox, m_adasLinesBox, m_adasVehiclesBox}) {
+            const QSignalBlocker blocker(box);
+            box->setChecked(checked);
+        }
+        configureRoadMode();
+    });
+    for (QCheckBox *box : {m_adasLightsBox, m_adasLinesBox, m_adasVehiclesBox}) {
+        connect(box, &QCheckBox::toggled, this, [this] { configureRoadMode(); });
+    }
+    connect(m_parkingBtn, &QPushButton::clicked, this, &MainWindow::openParking);
+    connect(m_etcBtn, &QPushButton::clicked, this, &MainWindow::openEtc);
+    connect(m_perfBtn, &QPushButton::clicked, this, &MainWindow::openPerf);
+    connect(m_switchBtn, &QPushButton::clicked, this, [this]() {
+        if (m_isCapturing && m_captureThread) {
+            m_captureThread->stop();
+            m_captureThread->wait();
+            m_isCapturing = false;
+            m_controlBtn->setText("开始采集");
+        }
+        postStatus("", true);
+        emit switchAccountRequested();
+    });
+    connect(m_inputModeBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::handleInputModeChanged);
+    connect(m_viewModeBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::handleViewModeChanged);
+    connect(m_mosaicCfgBtn, &QPushButton::clicked, this, &MainWindow::openMosaicConfig);
+    connect(m_sdImportBtn, &QPushButton::clicked, this, [this]() {
+        QMenu menu(this);
+        QAction *actImage = menu.addAction("导入图片");
+        QAction *actVideo = menu.addAction("导入视频");
+        QAction *actFolder = menu.addAction("导入图片文件夹(源1~源4子目录为四路)");
+        QAction *picked = menu.exec(m_sdImportBtn->mapToGlobal(QPoint(0, m_sdImportBtn->height())));
+        QString path;
+        if (picked == actImage) {
+            path = QFileDialog::getOpenFileName(this, "选择图片", "", "图片 (*.jpg *.jpeg *.png *.bmp *.webp)");
+        } else if (picked == actVideo) {
+            path = QFileDialog::getOpenFileName(this, "选择视频", "", "视频 (*.mp4 *.avi *.mov *.mkv *.ts *.m4v)");
+        } else if (picked == actFolder) {
+            path = QFileDialog::getExistingDirectory(this, "选择图片文件夹", QDir::homePath());
+        }
+        applySdSourcePath(path);
+    });
+    connect(m_videoImportBtn, &QPushButton::clicked, this, [this]() {
+        static const std::array<QString, 4> names{{
+            QStringLiteral("前视"), QStringLiteral("后视"),
+            QStringLiteral("左视"), QStringLiteral("右视")
+        }};
+        QStringList paths = m_sdVideoPaths;
+        while (paths.size() < 4) paths.push_back(QString());
+        const QString filter = "视频 (*.mp4 *.avi *.mov *.mkv *.ts *.m4v)";
+        QDialog dialog(this);
+        dialog.setWindowTitle(QStringLiteral("分别选择四路视频"));
+        auto *layout = new QVBoxLayout(&dialog);
+        auto *buttons = new QDialogButtonBox(
+            QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+        buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("导入四路视频"));
+        buttons->button(QDialogButtonBox::Ok)->setEnabled(
+            std::all_of(paths.cbegin(), paths.cend(),
+                        [](const QString &path) { return !path.isEmpty(); }));
+        for (int i = 0; i < 4; ++i) {
+            auto *row = new QHBoxLayout();
+            auto *nameLabel = new QLabel(names[static_cast<size_t>(i)], &dialog);
+            nameLabel->setFixedWidth(56);
+            auto *pathLabel = new QLabel(&dialog);
+            pathLabel->setMinimumWidth(260);
+            pathLabel->setText(paths[i].isEmpty()
+                ? QStringLiteral("未选择") : QFileInfo(paths[i]).fileName());
+            pathLabel->setToolTip(paths[i]);
+            auto *chooseButton = new QPushButton(QStringLiteral("选择视频"), &dialog);
+            row->addWidget(nameLabel);
+            row->addWidget(pathLabel, 1);
+            row->addWidget(chooseButton);
+            layout->addLayout(row);
+
+            connect(chooseButton, &QPushButton::clicked, &dialog,
+                    [&dialog, &paths, pathLabel, filter, i, names,
+                     buttons]() {
+                const QString current = paths[i];
+                const QString startDir = current.isEmpty()
+                    ? QDir::homePath() : QFileInfo(current).absolutePath();
+                const QString path = QFileDialog::getOpenFileName(
+                    &dialog, QStringLiteral("选择%1视频")
+                        .arg(names[static_cast<size_t>(i)]), startDir, filter);
+                if (path.isEmpty()) return;
+                paths[i] = path;
+                pathLabel->setText(QFileInfo(path).fileName());
+                pathLabel->setToolTip(path);
+                buttons->button(QDialogButtonBox::Ok)->setEnabled(
+                    std::all_of(paths.cbegin(), paths.cend(),
+                                [](const QString &selected) {
+                                    return !selected.isEmpty();
+                                }));
+            });
+        }
+        layout->addWidget(buttons);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        if (dialog.exec() == QDialog::Accepted) applySdVideoPaths(paths);
+    });
+    handleViewModeChanged(m_viewModeBox->currentIndex());
+    applyInputModeUi();
+
+    m_backendClient = new BackendClient(this);
+    connect(m_backendClient, &BackendClient::statusChanged, this, [this](bool ok, const QString &err) {
+        if (!m_backendCommLabel) return;
+        m_backendCommLabel->setText(ok ? "后端：已连接" : "后端：未连接");
+        m_backendCommLabel->setToolTip(ok ? "" : err);
+        if (ok) {
+            postStatus("", true);
+            postBusinessSnapshot();
+        }
+    });
+    {
+        const BackendSettingsData bs = loadEffectiveBackendSettings();
+        if (!bs.backendBase.isEmpty()) {
+            QString err;
+            QUrl base = normalizeBackendBase(bs.backendBase, &err);
+            if (base.isValid()) {
+                m_backendClient->setBaseUrl(base, bs.backendSource);
+                m_backendClient->start();
+            }
+        }
+    }
+
+    {
+        BusinessDialog::Page p = (m_businessSystem == BusinessSystem::Etc) ? BusinessDialog::Page::Etc : BusinessDialog::Page::Parking;
+        if (!m_businessDlg) m_businessDlg = new BusinessDialog(p, this);
+        if (m_businessDlg && !m_bizReportConnected) {
+            connect(m_businessDlg, &BusinessDialog::bizReportReady, this, [this](const QJsonObject &payload){
+                if (m_backendClient) {
+                    m_backendClient->postJson("/api/rk/report/business", payload);
+                }
+            }, Qt::UniqueConnection);
+            m_bizReportConnected = true;
+        }
+        if (m_businessDlg) m_businessDlg->hide();
+    }
+    postBusinessSnapshot();
+
+    m_apiServer = new ApiServer(m_backendClient, m_businessDlg, &m_userMessageConfig,
+                                nullptr, m_captureThread, this);
+    m_apiServer->listen(3000);
+    connect(m_apiServer, &ApiServer::userMessageConfigChanged, this, [this]() {
+        postStatus("", true);
+    });
+    m_userMessageCloudSync = new UserMessageCloudSync(m_backendClient, &m_userMessageConfig, this);
+    connect(m_userMessageCloudSync, &UserMessageCloudSync::configChanged, this, [this]() {
+        postStatus("", true);
+    });
+    m_userMessageCloudSync->start();
+    connect(m_apiServer, &ApiServer::peerDiscovered, this, [this](const QString &ip) {
+        if (!m_backendClient || m_backendClient->ok() || !m_backendClient->autoDiscoveryAllowed()) return;
+
+        const QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        const QString portsCsv = env.value("PC_BACKEND_PORTS").trimmed();
+        const QString portSingle = env.value("PC_BACKEND_PORT").trimmed();
+
+        QList<int> ports;
+        auto addPort = [&ports](int p) {
+            if (p <= 0 || p > 65535) return;
+            if (ports.contains(p)) return;
+            ports.append(p);
+        };
+
+        if (!portsCsv.isEmpty()) {
+            const QStringList ps = portsCsv.split(',', Qt::SkipEmptyParts);
+            for (const auto &s0 : ps) {
+                const QString s = s0.trimmed();
+                const int dash = s.indexOf('-');
+                if (dash > 0) {
+                    const int a = s.left(dash).trimmed().toInt();
+                    const int b = s.mid(dash + 1).trimmed().toInt();
+                    if (a > 0 && b > 0) {
+                        const int lo = qMin(a, b);
+                        const int hi = qMax(a, b);
+                        for (int p = lo; p <= hi; p++) addPort(p);
+                        continue;
+                    }
+                }
+                addPort(s.toInt());
+            }
+        } else if (!portSingle.isEmpty()) {
+            addPort(portSingle.toInt());
+        }
+        if (ports.isEmpty()) {
+            for (int p = 8080; p <= 8092; p++) addPort(p);
+        }
+
+        QVector<QUrl> candidates;
+        candidates.reserve(ports.size());
+        for (int p : ports) candidates.append(QUrl(QString("http://%1:%2/").arg(ip).arg(p)));
+        m_backendClient->setBaseUrlCandidates(candidates);
+        m_backendClient->start();
+    });
+
+    m_plateFilterProv = "任意";
+    auto applyPlateFilterState = [this]() {
+        int sourceSel = m_plateFilterSourceSel;
+        QString rest = m_plateFilterRest;
+        QString prov = m_plateFilterProv;
+        for (auto &it : m_plateItems) {
+            bool ok = true;
+            if (sourceSel > 0) ok = ok && (it.source == sourceSel);
+            if (!rest.isEmpty()) {
+                if (rest == "*") {
+                    if (!prov.isEmpty() && prov != "任意") ok = ok && it.plate.startsWith(prov);
+                } else {
+                    QString key = rest;
+                    if (!prov.isEmpty() && prov != "任意") key = prov + rest;
+                    ok = ok && it.plate.contains(key, Qt::CaseInsensitive);
+                }
+            } else if (!prov.isEmpty() && prov != "任意") {
+                ok = ok && it.plate.startsWith(prov);
+            }
+            if (it.widget) it.widget->setVisible(ok);
+        }
+    };
+
+    auto commitAndApplyPlateFilters = [this, applyPlateFilterState]() {
+        m_plateFilterSourceSel = m_plateSourceFilter ? m_plateSourceFilter->currentIndex() : 0;
+        m_plateFilterRest = m_plateSearch ? m_plateSearch->text().trimmed() : QString();
+        m_plateFilterProv = m_plateProvBox ? m_plateProvBox->currentText().trimmed() : QString("任意");
+        if (m_plateFilterProv.isEmpty()) m_plateFilterProv = "任意";
+        m_plateFilterActive = true;
+        applyPlateFilterState();
+    };
+
+    connect(m_plateQueryBtn, &QPushButton::clicked, this, [commitAndApplyPlateFilters](){ commitAndApplyPlateFilters(); });
+
+    connect(m_plateChooseDirBtn, &QPushButton::clicked, this, [this]() {
+        QString dir = QFileDialog::getExistingDirectory(this, "选择保存目录", m_plateSaveDir.isEmpty() ? QDir::homePath() : m_plateSaveDir);
+        if (dir.isEmpty()) return;
+        m_plateSaveDir = dir;
+        if (m_plateDirLabel) m_plateDirLabel->setText(dir);
+    });
+
+    connect(m_plateSaveBtn, &QPushButton::clicked, this, [this]() {
+        if (m_plateSaveDir.isEmpty()) {
+            QString dir = QFileDialog::getExistingDirectory(this, "选择保存目录", QDir::homePath());
+            if (dir.isEmpty()) return;
+            m_plateSaveDir = dir;
+            if (m_plateDirLabel) m_plateDirLabel->setText(dir);
+        }
+
+        auto safeName = [](const QString& s) {
+            QString out;
+            out.reserve(s.size());
+            for (const auto& ch : s) {
+                if (ch.isLetterOrNumber() || ch == '_' || ch == '-' ) out.append(ch);
+                else out.append('_');
+            }
+            return out;
+        };
+
+        int saved = 0;
+        for (const auto &it : m_plateItems) {
+            if (it.widget && !it.widget->isVisible()) continue;
+            if (it.thumb.isNull()) continue;
+
+            QString dateKey = it.time.left(10);
+            dateKey.remove('-');
+            if (dateKey.size() != 8) dateKey = QDate::currentDate().toString("yyyyMMdd");
+
+            QDir base(m_plateSaveDir);
+            QString dayDir = base.filePath(dateKey);
+            QDir().mkpath(dayDir);
+
+            QString timeKey = it.time;
+            timeKey.replace(":", "-");
+            timeKey.replace(" ", "_");
+            QString fn = QString("%1_source%2_%3.jpg").arg(safeName(it.plate)).arg(it.source).arg(safeName(timeKey));
+            QString full = QDir(dayDir).filePath(fn);
+            it.thumb.save(full, "JPG", 90);
+            saved++;
+        }
+        QMessageBox::information(this, "完成", QString("已保存 %1 张抓拍图。").arg(saved));
+    });
+
+    m_captureThread->setAlgoMode(m_algoMode);
+    m_expectedDisplayConfigVersion = m_captureThread->displayConfigVersion();
+
+    m_clockTimer = new QTimer(this);
+    connect(m_clockTimer, &QTimer::timeout, this, [this, compact720](){
+        QTimeZone tz("Asia/Shanghai");
+        m_clockLabel->setText(QDateTime::currentDateTimeUtc().toTimeZone(tz).toString(
+            compact720 ? "MM-dd HH:mm:ss" : "北京时间 yyyy-MM-dd HH:mm:ss"));
+        postStatus("", false);
+    });
+    m_clockTimer->start(1000);
+    QTimeZone tz("Asia/Shanghai");
+    m_clockLabel->setText(QDateTime::currentDateTimeUtc().toTimeZone(tz).toString(
+        compact720 ? "MM-dd HH:mm:ss" : "北京时间 yyyy-MM-dd HH:mm:ss"));
+
+    UiSizing::fitWindow(this, compact720 ? QSize(1280, 720) : QSize(1600, 900),
+                        compact720 ? 0 : 24);
+
+    const QByteArray autoCapture = qgetenv("RK3568_AUTO_CAPTURE").trimmed();
+    if (!autoCapture.isEmpty() && autoCapture != "0" && autoCapture != "false") {
+        QTimer::singleShot(0, this, [this]() { handleStartStop(); });
+    }
+}
+
+// --- 析构函数 ---
+MainWindow::~MainWindow() {
+    // Stop the frame HTTP thread before the capture object can be destroyed.
+    delete m_apiServer;
+    m_apiServer = nullptr;
+    m_captureThread->stop();
+    m_captureThread->wait();
+}
+
+// --- 处理窗口缩放 (保持齿轮位置) ---
+void MainWindow::resizeEvent(QResizeEvent *event) {
+    QMainWindow::resizeEvent(event);
+}
+
+// --- 更新画面槽函数 ---
+void MainWindow::updateFrame(QImage img, quint64 displayConfigVersion) {
+    if (!latest_frame::displayFrameUsable(
+            displayConfigVersion, m_expectedDisplayConfigVersion)) {
+        if (m_captureThread) m_captureThread->acknowledgeFrameDelivery();
+        return;
+    }
+    m_expectedDisplayConfigVersion = displayConfigVersion;
+    if (m_inferredDirection >= 0 && !img.isNull()) {
+        QPainter painter(&img);
+        const QColor color = m_inferredForbidden ? QColor(230, 45, 45)
+            : m_inferredSlow ? QColor(235, 180, 40) : QColor(35, 220, 115);
+        const bool mosaic = m_inputMode == CaptureThread::InputMode::Pcie &&
+            m_viewModeBox && (m_viewModeBox->currentIndex() == 0 ||
+                              m_viewModeBox->currentIndex() == 5);
+        if (mosaic) {
+            const int halfW = img.width() / 2;
+            const int halfH = img.height() / 2;
+            drawRoadDirection(painter, QRect(0, 0, halfW, halfH), m_inferredDirection, color);
+            drawRoadDirection(painter, QRect(halfW, 0, img.width() - halfW, halfH),
+                              m_inferredDirection, color);
+            drawRoadDirection(painter, QRect(0, halfH, halfW, img.height() - halfH),
+                              m_inferredDirection, color);
+            drawRoadDirection(painter, QRect(halfW, halfH, img.width() - halfW,
+                                             img.height() - halfH), m_inferredDirection, color);
+        } else {
+            drawRoadDirection(painter, img.rect(), m_inferredDirection, color);
+        }
+        painter.end();
+    }
+    m_videoLabel->setFrame(std::move(img));
+    if (m_captureThread) m_captureThread->acknowledgeFrameDelivery();
+}
+
+void MainWindow::updateRoadInference(int direction, bool forbidden, bool slow,
+                                     QString status) {
+    m_inferredDirection = direction;
+    m_inferredForbidden = forbidden;
+    m_inferredSlow = slow;
+    if (m_roadDecisionLabel) m_roadDecisionLabel->setText(status);
+}
+
+void MainWindow::handleRoadInferenceTelemetry(QJsonObject payload) {
+    if (payload.value("config_version").toVariant().toULongLong() !=
+        m_expectedDisplayConfigVersion) return;
+    updateRoadInference(payload.value("inferred_direction").toInt(-1),
+                        payload.value("forbidden").toBool(false),
+                        payload.value("slow").toBool(false),
+                        payload.value("decision_text").toString());
+    postRoadInferenceTelemetry(payload);
+}
+
+void MainWindow::postRoadInferenceTelemetry(const QJsonObject &payload) {
+    if (!m_backendClient) return;
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const QString decisionKey = QStringLiteral("%1|%2|%3|%4|%5|%6|%7")
+        .arg(payload.value("mode").toString())
+        .arg(payload.value("selected_direction").toInt(-1))
+        .arg(payload.value("inferred_direction").toInt(-1))
+        .arg(payload.value("forbidden").toBool(false) ? 1 : 0)
+        .arg(payload.value("slow").toBool(false) ? 1 : 0)
+        .arg(payload.value("alarm").toBool(false) ? 1 : 0)
+        .arg(payload.value("decision_text").toString());
+    const bool decisionChanged = decisionKey != m_lastRoadTelemetryFingerprint;
+    const bool alarm = payload.value("alarm").toBool(false);
+    // The crop is evidence, not a video stream. Limit routine uploads while
+    // sending a changed decision or red-light alarm immediately.
+    if (!decisionChanged && !alarm && m_lastRoadTelemetryPostMs > 0 &&
+        nowMs - m_lastRoadTelemetryPostMs < 350) return;
+
+    QJsonObject report = payload;
+    const bool inferenceEnabled = payload.value("inference_enabled").toBool(false) &&
+        payload.value("mode").toString() != QStringLiteral("off");
+    const int arrowDirection = payload.value("inferred_direction").toInt(-1);
+    const QString arrowState = !inferenceEnabled ? QStringLiteral("off")
+        : payload.value("alarm").toBool(false) || payload.value("forbidden").toBool(false)
+            ? QStringLiteral("red")
+            : payload.value("slow").toBool(false) ? QStringLiteral("yellow")
+            : arrowDirection >= 0 && arrowDirection <= 5 ? QStringLiteral("green")
+            : QStringLiteral("unknown");
+    report.insert("arrow_state", arrowState);
+    report.insert("control_owner", "external_upper_computer");
+    report.insert("vehicle_control_delegated", true);
+    // The upper computer receives only structured text/numeric telemetry and
+    // the derived drive command. Camera images and video are never uploaded.
+    report.remove("source4_crop_jpeg_base64");
+    report.remove("source4_crop_rect");
+    report.remove("source4_crop_width");
+    report.remove("source4_crop_height");
+    report.remove("source4_crop_content_type");
+    report.insert("time_bj", payload.value("time_bj").toString(nowBjText()));
+    report.insert("received_from", "rk3568_capture_thread");
+    m_backendClient->postJson("/api/rk/realtime/vision", report);
+    m_lastRoadTelemetryPostMs = nowMs;
+    m_lastRoadTelemetryFingerprint = decisionKey;
+    qInfo().noquote() << QString("RK_VISION_REPORT mode=%1 frame=%2 boxes=%3 direction=%4 forbidden=%5 slow=%6 alarm=%7")
+        .arg(report.value("mode").toString())
+        .arg(report.value("frame_sequence").toVariant().toLongLong())
+        .arg(report.value("detections").toArray().size())
+        .arg(report.value("inferred_direction_name").toString())
+        .arg(report.value("forbidden").toBool(false) ? 1 : 0)
+        .arg(report.value("slow").toBool(false) ? 1 : 0)
+        .arg(report.value("alarm").toBool(false) ? 1 : 0);
+}
+
+void MainWindow::setTurnCardDirection(TurnDirection direction) {
+    m_turnCardDirection = direction;
+    configureRoadMode();
+}
+
+void MainWindow::configureRoadMode() {
+    if (!m_captureThread) return;
+    const int mode = m_adasModelBox && m_adasModelBox->isChecked() ? 1
+        : m_navigationModelBox && m_navigationModelBox->isChecked() ? 2 : 0;
+    const int requestedDirection = static_cast<int>(m_turnCardDirection);
+    m_selectedRoadMode = mode;
+    unsigned modelMask = 0;
+    QStringList selectedModels;
+    if (m_adasLightsBox && m_adasLightsBox->isChecked()) {
+        modelMask |= adas_models::Lights;
+        selectedModels << QStringLiteral("红绿灯");
+    }
+    if (m_adasLinesBox && m_adasLinesBox->isChecked()) {
+        modelMask |= adas_models::Lines;
+        selectedModels << QStringLiteral("交通线");
+    }
+    if (m_adasVehiclesBox && m_adasVehiclesBox->isChecked()) {
+        modelMask |= adas_models::Vehicles;
+        selectedModels << QStringLiteral("行人及车辆");
+    }
+    if (m_adasOptionsPanel) m_adasOptionsPanel->setVisible(mode == 1);
+    if (m_adasAllBox) {
+        const QSignalBlocker blocker(m_adasAllBox);
+        m_adasAllBox->setChecked(modelMask == adas_models::All);
+    }
+    m_captureThread->configureRoadInference(mode, requestedDirection,
+        (modelMask & adas_models::Lines) != 0,
+        (modelMask & adas_models::Lights) != 0, modelMask);
+    m_captureThread->setGlobalInferenceEnabled(
+        mode == 0 ? m_runtimeSettings.globalInferenceEnabled : false);
+    m_expectedDisplayConfigVersion = m_captureThread->displayConfigVersion();
+
+    if (mode == 0) {
+        m_inferredDirection = requestedDirection;
+        m_inferredForbidden = false;
+        m_inferredSlow = false;
+        if (m_roadModelStatusLabel)
+            m_roadModelStatusLabel->setText(QStringLiteral("未选择驾驶模式"));
+        if (m_roadDecisionLabel)
+            m_roadDecisionLabel->setText(QStringLiteral("请选择 ADAS 或导航模式"));
+    } else if (mode == 1) {
+        m_inferredDirection = modelMask ? requestedDirection : -1;
+        m_inferredForbidden = false;
+        m_inferredSlow = false;
+        if (m_roadModelStatusLabel)
+            m_roadModelStatusLabel->setText(QStringLiteral("当前处于 ADAS 模式"));
+        if (m_roadDecisionLabel)
+            m_roadDecisionLabel->setText(modelMask
+                ? QStringLiteral("正在检测：") + selectedModels.join(QStringLiteral("、"))
+                : QStringLiteral("请选择需要检测的类别"));
+    } else {
+        m_inferredDirection = -1;
+        m_inferredForbidden = false;
+        m_inferredSlow = false;
+        if (m_roadModelStatusLabel)
+            m_roadModelStatusLabel->setText(QStringLiteral("当前处于导航模式"));
+        if (m_roadDecisionLabel)
+            m_roadDecisionLabel->setText(QStringLiteral("正在分析导航标志与行驶方向"));
+    }
+}
+
+// --- 更新FPS槽函数 ---
+void MainWindow::updateFps(double fps) {
+    m_fpsLabel->setText(QString("道路推理FPS: %1").arg(fps, 0, 'f', 2));
+    m_lastFps = fps;
+}
+
+void MainWindow::applyInputModeUi() {
+    const bool isPcie = (m_inputMode == CaptureThread::InputMode::Pcie);
+    if (m_inputModeBox && m_inputModeBox->currentIndex() != (isPcie ? 0 : 1)) {
+        m_inputModeBox->blockSignals(true);
+        m_inputModeBox->setCurrentIndex(isPcie ? 0 : 1);
+        m_inputModeBox->blockSignals(false);
+    }
+    if (m_sdImportBtn) m_sdImportBtn->setEnabled(true);
+    if (m_videoImportBtn) m_videoImportBtn->setEnabled(true);
+    if (m_viewModeBox) m_viewModeBox->setEnabled(true);
+    if (m_mosaicCfgBtn) {
+        const bool enableMosaic = m_viewModeBox && m_viewModeBox->currentIndex() == 5;
+        m_mosaicCfgBtn->setEnabled(enableMosaic);
+    }
+    if (m_inputInfoLabel) {
+        const QString text = isPcie ? QString("PCIe实时采集")
+            : !m_sdVideoPaths.isEmpty() ? QStringLiteral("四路独立视频")
+            : (m_sdSourcePath.isEmpty() ? QStringLiteral("未选择SD卡文件/目录")
+                                        : m_sdSourcePath);
+        static_cast<ElidedLabel*>(m_inputInfoLabel)->setFullText(text);
+    }
+}
+
+bool MainWindow::ensureSdSourceReady() {
+    if (m_inputMode != CaptureThread::InputMode::SdCard) return true;
+    if (!m_sdSourcePath.isEmpty() || m_sdVideoPaths.size() == 4) return true;
+    QMessageBox::information(this, "提示", "当前为SD卡输入，请先导入图片、视频或图片文件夹。");
+    return false;
+}
+
+void MainWindow::applySdSourcePath(const QString &path) {
+    const QString trimmed = path.trimmed();
+    if (trimmed.isEmpty()) return;
+    m_sdSourcePath = trimmed;
+    m_sdVideoPaths.clear();
+    if (m_captureThread) m_captureThread->setSdSourcePath(m_sdSourcePath);
+    if (m_inputMode != CaptureThread::InputMode::SdCard) {
+        m_inputMode = CaptureThread::InputMode::SdCard;
+        if (m_captureThread) m_captureThread->setInputMode(m_inputMode);
+    }
+    if (m_captureThread) {
+        m_expectedDisplayConfigVersion = m_captureThread->displayConfigVersion();
+    }
+    if (m_videoLabel) {
+        m_videoLabel->setStatusText("正在切换输入...");
+    }
+    applyInputModeUi();
+    if (m_isCapturing && m_captureThread) {
+        m_captureThread->stop();
+        m_captureThread->wait();
+        m_captureThread->startCapture();
+    }
+    postStatus("sd_media", true);
+}
+
+void MainWindow::applySdVideoPaths(const QStringList &paths) {
+    if (paths.size() != 4) return;
+    m_sdVideoPaths = paths;
+    m_sdSourcePath.clear();
+    if (m_captureThread) m_captureThread->setSdVideoPaths(m_sdVideoPaths);
+    if (m_inputMode != CaptureThread::InputMode::SdCard) {
+        m_inputMode = CaptureThread::InputMode::SdCard;
+        if (m_captureThread) m_captureThread->setInputMode(m_inputMode);
+    }
+    if (m_captureThread)
+        m_expectedDisplayConfigVersion = m_captureThread->displayConfigVersion();
+    if (m_videoLabel) m_videoLabel->setStatusText("正在切换四路视频...");
+    applyInputModeUi();
+    if (m_isCapturing && m_captureThread) {
+        m_captureThread->stop();
+        m_captureThread->wait();
+        m_captureThread->startCapture();
+    }
+    postStatus("sd_media", true);
+}
+
+void MainWindow::handleInputModeChanged(int index) {
+    const CaptureThread::InputMode next = (index == 1) ? CaptureThread::InputMode::SdCard : CaptureThread::InputMode::Pcie;
+    if (m_inputMode == next) {
+        applyInputModeUi();
+        return;
+    }
+    m_inputMode = next;
+    if (m_captureThread) m_captureThread->setInputMode(m_inputMode);
+    if (m_captureThread) {
+        m_expectedDisplayConfigVersion = m_captureThread->displayConfigVersion();
+    }
+    if (m_videoLabel) {
+        m_videoLabel->setStatusText("正在切换输入...");
+    }
+    applyInputModeUi();
+
+    if (m_isCapturing && m_captureThread) {
+        m_captureThread->stop();
+        m_captureThread->wait();
+        if (m_inputMode == CaptureThread::InputMode::SdCard && !ensureSdSourceReady()) {
+            m_isCapturing = false;
+            if (m_controlBtn) m_controlBtn->setText("开始采集");
+        } else {
+            m_captureThread->startCapture();
+        }
+    }
+    postStatus(m_inputMode == CaptureThread::InputMode::Pcie ? "" : "sd_media", true);
+}
+
+void MainWindow::postStatus(const QString &view, bool force) {
+    if (!m_backendClient) return;
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const qint64 minInterval = m_isCapturing ? 800 : 5000;
+    if (!force && m_lastStatusPostMs > 0 && nowMs - m_lastStatusPostMs < minInterval) return;
+    m_lastStatusPostMs = nowMs;
+
+    QString vv = view;
+    if (vv.isEmpty() && m_viewModeBox) {
+        const int idx = m_viewModeBox->currentIndex();
+        if (idx == 0) vv = (m_inputMode == CaptureThread::InputMode::SdCard) ? "sd_mosaic_raw" : "mosaic_raw";
+        else if (idx >= 1 && idx <= 4) vv = QString("src%1").arg(idx);
+        else if (idx == 5) vv = (m_inputMode == CaptureThread::InputMode::SdCard) ? "sd_mosaic_custom" : "mosaic_custom";
+    }
+
+    bool nodeOk = false;
+    bool moduleOk = false;
+    bool boundOk = false;
+    QString nodePath;
+    readPcieState(nodeOk, nodePath, moduleOk, boundOk);
+    const bool pcieMounted = nodeOk || moduleOk || boundOk;
+
+    QJsonObject o;
+    o.insert("device", "rk3568");
+    o.insert("role", m_developerMode ? "developer" : "admin");
+    o.insert("user_state", m_developerMode ? "developer" : "admin");
+    o.insert("ui_mode", m_developerMode ? "developer" : "admin");
+    o.insert("account_mode", m_developerMode ? "developer" : "admin");
+    o.insert("gui_render_backend", m_videoLabel
+        ? m_videoLabel->rendererBackend() : QStringLiteral("unavailable"));
+    o.insert("gui_gl_initialized", m_videoLabel && m_videoLabel->glInitialized());
+    o.insert("gui_gpu_active", m_videoLabel &&
+        m_videoLabel->glInitialized() && m_videoLabel->hardwareAccelerated());
+    o.insert("gui_gl_renderer", m_videoLabel
+        ? m_videoLabel->rendererName() : QStringLiteral("unavailable"));
+    o.insert("biz_system", (m_businessSystem == BusinessSystem::Parking) ? "parking" : "etc");
+    o.insert("user_message_config", m_userMessageConfig.toJson(false));
+    o.insert("user_message_config_path", m_userMessageConfig.configPath());
+    if (m_userMessageCloudSync) o.insert("user_message_config_sync", m_userMessageCloudSync->statusJson());
+    if (m_ttsPlayer) {
+        QJsonObject tts;
+        tts.insert("enabled", m_ttsPlayer->isEnabled());
+        tts.insert("ready", m_ttsPlayer->isReady());
+        tts.insert("base_dir", m_ttsPlayer->baseDir());
+        tts.insert("output_device", m_ttsPlayer->outputDevice());
+        tts.insert("last_error", m_ttsPlayer->lastError());
+        o.insert("tts_wav", tts);
+    }
+    o.insert("runtime_settings", runtimeSettingsToJson(m_runtimeSettings));
+    o.insert("runtime_settings_path", runtimeSettingsPath());
+    o.insert("target_device_id", m_runtimeSettings.targetDeviceId.trimmed());
+    o.insert("input_mode", m_inputMode == CaptureThread::InputMode::SdCard ? "sdcard" : "pcie");
+    const QString inferMode =
+        (m_algoMode == CaptureThread::AlgoMode::EnvOnly) ? "env" : (m_algoMode == CaptureThread::AlgoMode::Overlay) ? "overlay" : "plate";
+    o.insert("infer_mode", inferMode);
+    if (m_inputMode == CaptureThread::InputMode::SdCard && !m_sdSourcePath.isEmpty()) {
+        o.insert("sd_source_path", m_sdSourcePath);
+    }
+    o.insert("pcie_driver_mounted", pcieMounted);
+    o.insert("pcie_driver_node", nodePath);
+    o.insert("pcie_driver_module_ok", moduleOk);
+    o.insert("pcie_driver_bound_ok", boundOk);
+    o.insert("driver", pcieMounted ? "mounted" : "not_mounted");
+    const DriverStatusSnapshot driverStatus = collectDriverStatus(&m_driverStatusState);
+    o.insert("driver_status", driverStatus.json);
+    o.insert("pcie_dma_memory", driverStatus.json.value("dma_memory"));
+    const QJsonValue captureMetricsValue = driverStatus.json.value("capture_metrics");
+    o.insert("driver_capture_metrics", captureMetricsValue);
+    if (captureMetricsValue.isObject()) {
+        const QJsonObject cm = captureMetricsValue.toObject();
+        o.insert("pcie_protocol", cm.value("protocol"));
+        o.insert("pcie_driver_abi_version", cm.value("driver_abi_version"));
+        o.insert("pcie_driver_features", cm.value("driver_features"));
+        o.insert("pcie_fpga_protocol_version", cm.value("fpga_protocol_version"));
+        o.insert("pcie_fpga_capabilities", cm.value("fpga_capabilities"));
+        o.insert("pcie_target_fps_milli", cm.value("target_fps_milli"));
+        o.insert("pcie_fpga_target_fps_milli", cm.value("fpga_target_fps_milli"));
+        o.insert("pcie_bar0_read_bytes", cm.value("bar0_read_bytes"));
+        o.insert("pcie_bar1_write_bytes", cm.value("bar1_write_bytes"));
+        o.insert("pcie_bar_contract_ok", cm.value("bar_contract_ok"));
+        o.insert("pcie_interrupt_mode", cm.value("interrupt_mode"));
+        o.insert("pcie_source_mask", cm.value("source_mask"));
+        o.insert("pcie_all_four_sources_valid", cm.value("all_four_sources_valid"));
+        o.insert("pcie_rate_control_supported", cm.value("rate_control_supported"));
+        o.insert("pcie_fixed_30fps_active", cm.value("fixed_30fps_active"));
+        o.insert("pcie_v1_fallback_allowed", cm.value("v1_fallback_allowed"));
+        o.insert("pcie_v1_fallback_active", cm.value("v1_fallback_active"));
+        o.insert("pcie_source_locked", cm.value("source_locked"));
+        o.insert("pcie_recovery_count", cm.value("recovery_count"));
+        o.insert("pcie_consecutive_timeouts", cm.value("consecutive_timeouts"));
+        o.insert("pcie_recovery_state", cm.value("recovery_state"));
+        o.insert("pcie_rx_fps", cm.value("actual_rx_fps"));
+        o.insert("pcie_frame_interval_ms", cm.value("frame_interval_ms"));
+        o.insert("pcie_dma_ms", cm.value("dma_transfer_ms"));
+        o.insert("pcie_dma_wait_ms", cm.value("dma_wait_ms"));
+        o.insert("pcie_kernel_staging_ms", cm.value("kernel_staging_ms"));
+        o.insert("pcie_user_copy_ms", cm.value("user_copy_ms"));
+        o.insert("pcie_batch_ioctl", cm.value("batch_ioctl"));
+        o.insert("pcie_staged_copy", cm.value("staged_copy"));
+        o.insert("pcie_irq_wait", cm.value("irq_wait"));
+        o.insert("pcie_frame_v2", cm.value("frame_v2"));
+        o.insert("pcie_mmap_enabled", cm.value("mmap_enabled"));
+        o.insert("pcie_frame_width", cm.value("frame_width"));
+        o.insert("pcie_frame_height", cm.value("frame_height"));
+        o.insert("pcie_frame_stride_bytes", cm.value("frame_stride_bytes"));
+        o.insert("pcie_frame_bytes", cm.value("frame_bytes"));
+        o.insert("pcie_ring_count", cm.value("ring_count"));
+        o.insert("pcie_fpga_dropped_frames", cm.value("fpga_dropped_frames"));
+        o.insert("pcie_host_dropped_frames", cm.value("host_dropped_frames"));
+        o.insert("pcie_sequence_gaps", cm.value("sequence_gaps"));
+        o.insert("pcie_protocol_errors", cm.value("protocol_errors"));
+        if (cm.contains("batch_fallback_reason")) {
+            o.insert("pcie_batch_fallback_reason", cm.value("batch_fallback_reason"));
+        }
+        if (cm.contains("irq_fallback_reason")) {
+            o.insert("pcie_irq_fallback_reason", cm.value("irq_fallback_reason"));
+        }
+        o.insert("pcie_rx_frames", cm.value("frames_total"));
+        o.insert("pcie_dropped_frames", cm.value("dropped_frames"));
+    }
+    if (m_backendClient) {
+        const QJsonObject backendStatus = m_backendClient->statusJson();
+        for (auto it = backendStatus.begin(); it != backendStatus.end(); ++it) {
+            o.insert(it.key(), it.value());
+        }
+    }
+    if (m_apiServer) {
+        o.insert("rk_api_listening", m_apiServer->isListening());
+        o.insert("rk_api_port", (int)m_apiServer->port());
+        o.insert("rk_api_bind", m_apiServer->serverAddress());
+        o.insert("rk_api_error", m_apiServer->errorString());
+    }
+    o.insert("control_owner", "external_upper_computer");
+    o.insert("capture_running", m_isCapturing);
+    o.insert("global_inference_enabled",
+             m_runtimeSettings.globalInferenceEnabled);
+    // This board is always passive with respect to vehicle control. The
+    // inference flag describes the pipeline, not command ownership.
+    o.insert("display_only", true);
+    if (!vv.isEmpty()) o.insert("view", vv);
+    const bool pcieInput = m_inputMode == CaptureThread::InputMode::Pcie;
+    const bool pcieFourSourceView = pcieInput &&
+        (vv == "mosaic_raw" || vv == "mosaic_custom");
+    const bool pciePerSource =
+        m_runtimeSettings.pcieInferenceStrategy == 1;
+    QString pciePlateStrategy = "inactive";
+    if (pcieInput && m_isCapturing) {
+        pciePlateStrategy = pcieFourSourceView
+             ? (pciePerSource ? "per_source_full" : "mosaic_single")
+            : "single_source";
+    }
+    if (!m_runtimeSettings.globalInferenceEnabled) {
+        pciePlateStrategy = "disabled";
+    }
+
+    QJsonObject slidingRuntime;
+    slidingRuntime.insert("status_known", true);
+    slidingRuntime.insert("enabled", false);
+    slidingRuntime.insert("active", false);
+    slidingRuntime.insert("removed", true);
+    slidingRuntime.insert("strategy", "single_full_frame");
+    slidingRuntime.insert("window_count", 0);
+    slidingRuntime.insert("work_width", 0);
+    slidingRuntime.insert("work_height", 0);
+    slidingRuntime.insert("window_width", 0);
+    slidingRuntime.insert("window_height", 0);
+    slidingRuntime.insert("stride_x", 0);
+    slidingRuntime.insert("stride_y", 0);
+    slidingRuntime.insert("pcie_fixed_roi_enabled", false);
+
+    const int detectorInputWidth = yolo_current_detector_input_width();
+    const int detectorInputHeight = yolo_current_detector_input_height();
+    const bool detectorLegacy = yolo_current_detector_profile() == 0;
+    auto makeLetterbox = [detectorInputWidth, detectorInputHeight,
+                          detectorLegacy](int sourceWidth, int sourceHeight) {
+        const double gain = std::min(
+            (double)detectorInputWidth / std::max(1, sourceWidth),
+            (double)detectorInputHeight / std::max(1, sourceHeight));
+        const int contentWidth = std::max(
+            1, (int)std::lround(sourceWidth * std::min(1.0, gain)));
+        const int contentHeight = std::max(
+            1, (int)std::lround(sourceHeight * std::min(1.0, gain)));
+        const int padLeft = (detectorInputWidth - contentWidth) / 2;
+        const int padTop = (detectorInputHeight - contentHeight) / 2;
+        QJsonObject value;
+        value.insert("source_width", sourceWidth);
+        value.insert("source_height", sourceHeight);
+        value.insert("model_width", detectorInputWidth);
+        value.insert("model_height", detectorInputHeight);
+        value.insert("content_width", contentWidth);
+        value.insert("content_height", contentHeight);
+        value.insert("pad_left", padLeft);
+        value.insert("pad_right", detectorInputWidth - contentWidth - padLeft);
+        value.insert("pad_top", padTop);
+        value.insert("pad_bottom", detectorInputHeight - contentHeight - padTop);
+        value.insert("pad_value_rgb", detectorLegacy ? 0 : 114);
+        value.insert("scaleup", false);
+        return value;
+    };
+    const QJsonObject letterbox = makeLetterbox(1280, 720);
+    const QJsonObject sourceLetterbox = makeLetterbox(640, 360);
+
+    QJsonObject pciePlateInference;
+    pciePlateInference.insert("schema", "rk3568_pcie_plate_inference_v2");
+    pciePlateInference.insert("applicable", pcieFourSourceView);
+    pciePlateInference.insert("capture_running", m_isCapturing);
+    pciePlateInference.insert("input_mode", pcieInput ? "pcie" : "sdcard");
+    pciePlateInference.insert("view", vv);
+    pciePlateInference.insert("strategy", pciePlateStrategy);
+    pciePlateInference.insert("configured_strategy",
+                              m_runtimeSettings.pcieInferenceStrategy);
+    pciePlateInference.insert("fixed_roi_enabled", false);
+    pciePlateInference.insert("pcie_sliding_enabled", false);
+    pciePlateInference.insert(
+        "calls_per_cycle", pcieFourSourceView && pciePerSource ? 4 : 1);
+    pciePlateInference.insert("pipeline_enabled",
+                              m_runtimeSettings.detPipelineEnabled);
+    pciePlateInference.insert("preprocess_backend_configured",
+                              m_runtimeSettings.detPreprocessBackend);
+    pciePlateInference.insert("rga_compiled", yolo_rga_available());
+    pciePlateInference.insert("quantized_output",
+                              detectorLegacy &&
+                                  m_runtimeSettings.detQuantizedOutput);
+    pciePlateInference.insert("source_count", 4);
+    pciePlateInference.insert("active_source_count", pcieFourSourceView ? 4 : 1);
+    pciePlateInference.insert("source_mask", pcieFourSourceView ? 0x0f : 0x01);
+    pciePlateInference.insert("source_layout", "2x2");
+    pciePlateInference.insert("inference_unit", "source");
+    pciePlateInference.insert("source_frame_width", 640);
+    pciePlateInference.insert("source_frame_height", 360);
+    pciePlateInference.insert("source_frame_format", "BGR888");
+    pciePlateInference.insert("source_indices", QJsonArray{1, 2, 3, 4});
+    pciePlateInference.insert("sliding_disabled_for_pcie", true);
+    pciePlateInference.insert("source_width", 640);
+    pciePlateInference.insert("source_height", 360);
+    pciePlateInference.insert("mosaic_width", 1280);
+    pciePlateInference.insert("mosaic_height", 720);
+    pciePlateInference.insert("model_input_width", detectorInputWidth);
+    pciePlateInference.insert("model_input_height", detectorInputHeight);
+    pciePlateInference.insert("detector_profile",
+                              yolo_current_detector_profile_key());
+    pciePlateInference.insert("detector_family",
+                              yolo_current_detector_family());
+    pciePlateInference.insert("detector_output_contract",
+                              yolo_current_detector_output_contract());
+    pciePlateInference.insert("runtime", slidingRuntime);
+    pciePlateInference.insert("detector_runtime", m_lastDetRuntimeMetrics);
+    pciePlateInference.insert("single_pass_letterbox", letterbox);
+    pciePlateInference.insert("per_source_letterbox", sourceLetterbox);
+    o.insert("pcie_plate_inference", pciePlateInference);
+
+    const char *detModelRaw = yolo_detection_model_path();
+    const char *recModelRaw = yolo_recognition_model_path();
+    const QString detModelPath = detModelRaw
+        ? QString::fromLocal8Bit(detModelRaw) : QString();
+    const QString recModelPath = recModelRaw
+        ? QString::fromLocal8Bit(recModelRaw) : QString();
+    o.insert("plate_detector_model_path", detModelPath);
+    o.insert("plate_detector_model_name", QFileInfo(detModelPath).fileName());
+    o.insert("detector_profile", yolo_current_detector_profile_key());
+    o.insert("detector_profile_id", yolo_current_detector_profile());
+    o.insert("detector_family", yolo_current_detector_family());
+    o.insert("detector_model_name", yolo_current_detector_model_name());
+    o.insert("detector_model_sha256", yolo_current_detector_sha256());
+    o.insert("detector_input_width", detectorInputWidth);
+    o.insert("detector_input_height", detectorInputHeight);
+    o.insert("detector_input_type", "RGB_UINT8_NHWC");
+    o.insert("detector_output_contract",
+             yolo_current_detector_output_contract());
+    o.insert("detector_runtime_backend", "cpp_rknn_npu");
+    o.insert("plate_recognizer_model_path", recModelPath);
+    o.insert("plate_recognizer_model_name", QFileInfo(recModelPath).fileName());
+    o.insert("recognizer_profile", yolo_current_recognizer_profile_key());
+    o.insert("recognizer_profile_id", yolo_current_recognizer_profile());
+    o.insert("recognizer_output_contract",
+             yolo_current_recognizer_output_contract());
+    o.insert("recognizer_input_width",
+             yolo_current_recognizer_input_width());
+    o.insert("recognizer_input_height",
+             yolo_current_recognizer_input_height());
+    o.insert("recognizer_input_format",
+             yolo_current_recognizer_input_format());
+    o.insert("recognizer_model_input_type",
+             yolo_current_recognizer_model_input_type());
+    o.insert("recognizer_text_layout",
+             yolo_current_recognizer_text_layout());
+    o.insert("recognizer_runtime_backend", "cpp_rknn_npu");
+    o.insert("plate_model_input_width", detectorInputWidth);
+    o.insert("plate_model_input_height", detectorInputHeight);
+    o.insert("plate_model_input_format", "RGB888");
+
+    o.insert("pcie_four_source_sliding_configured", false);
+    o.insert("pcie_four_source_fixed_roi_enabled", false);
+    o.insert("pcie_inference_strategy_configured",
+             m_runtimeSettings.pcieInferenceStrategy);
+    o.insert("pcie_plate_inference_strategy", pciePlateStrategy);
+    o.insert("plate_sliding_status_known", true);
+    o.insert("plate_sliding_active", false);
+    o.insert("plate_sliding_enabled_last_run", false);
+    o.insert("plate_sliding_removed", true);
+    o.insert("plate_sliding_window_count", 0);
+    o.insert("plate_sliding_work_width", 0);
+    o.insert("plate_sliding_work_height", 0);
+    o.insert("plate_sliding_window_width", 0);
+    o.insert("plate_sliding_window_height", 0);
+    o.insert("plate_sliding_stride_x", 0);
+    o.insert("plate_sliding_stride_y", 0);
+    o.insert("plate_adaptive_bounded", false);
+    o.insert("plate_adaptive_phase_count", 0);
+    o.insert("plate_adaptive_npu_calls_per_frame_max", 0);
+    o.insert("plate_adaptive_motion_priority", false);
+    o.insert("plate_adaptive_scene_cut_reset", false);
+    QJsonObject detRuntime = m_lastDetRuntimeMetrics;
+    const QString reportedStrategy =
+        detRuntime.value("strategy").toString();
+    const bool runtimeMatchesInput = !m_runtimeSettings.globalInferenceEnabled
+        ? reportedStrategy == "disabled"
+        : (pcieInput
+               ? reportedStrategy == pciePlateStrategy
+               : reportedStrategy == "sd_static" ||
+                     reportedStrategy == "single_source");
+    if (!m_isCapturing ||
+        (!detRuntime.isEmpty() && !runtimeMatchesInput)) {
+        detRuntime = QJsonObject();
+    }
+    if (detRuntime.isEmpty()) {
+        detRuntime.insert("executed", false);
+        detRuntime.insert("inference_enabled",
+                          m_runtimeSettings.globalInferenceEnabled);
+        detRuntime.insert("display_only",
+                          !m_runtimeSettings.globalInferenceEnabled);
+        detRuntime.insert("capture_async", false);
+        detRuntime.insert("latest_only", false);
+        detRuntime.insert("overlay_max_age_ms", 0.0);
+        detRuntime.insert("display_cycle_ms", 0.0);
+        detRuntime.insert("display_fps", 0.0);
+        detRuntime.insert("capture_dropped_frames", 0.0);
+        detRuntime.insert("strategy", pciePlateStrategy);
+        detRuntime.insert("pipeline_enabled",
+                          m_runtimeSettings.detPipelineEnabled);
+        detRuntime.insert("pipeline_active", false);
+        detRuntime.insert("quantized_output",
+                          detectorLegacy &&
+                              m_runtimeSettings.detQuantizedOutput);
+        detRuntime.insert("preprocess_backend", "uninitialized");
+        detRuntime.insert("preprocess_requested",
+                          m_runtimeSettings.detPreprocessBackend == 1
+                              ? "opencv"
+                              : m_runtimeSettings.detPreprocessBackend == 2
+                                  ? "rga" : "auto");
+        detRuntime.insert("preprocess_fallback_reason", "");
+        detRuntime.insert("task_count", 0);
+        detRuntime.insert("score_candidates", 0);
+        detRuntime.insert("decoded_candidates", 0);
+        detRuntime.insert("final_candidates", 0);
+        detRuntime.insert("configured_stride",
+                          std::max(1, m_runtimeSettings.plateInferStride));
+        detRuntime.insert("source_frame_sequence", 0.0);
+        detRuntime.insert("last_detection_source_sequence", 0.0);
+        detRuntime.insert("queue_depth", 0);
+        detRuntime.insert("dropped_tasks", 0);
+        detRuntime.insert("pre_ms", 0.0);
+        detRuntime.insert("npu_wall_ms", 0.0);
+        detRuntime.insert("npu_hw_ms", 0.0);
+        detRuntime.insert("post_ms", 0.0);
+        detRuntime.insert("e2e_ms", 0.0);
+        detRuntime.insert("overlap_saved_ms", 0.0);
+        detRuntime.insert("worker_ms", 0.0);
+        detRuntime.insert("overlay_ms", 0.0);
+        detRuntime.insert("task_fps", 0.0);
+        detRuntime.insert("cycle_fps", 0.0);
+        detRuntime.insert("fps_basis", "completed_detection_cycles");
+        detRuntime.insert("fps_window_ms", 0.0);
+        detRuntime.insert("result_age_ms", 0.0);
+    }
+    o.insert("plate_detector_runtime", detRuntime);
+    pciePlateInference.insert("detector_runtime", detRuntime);
+    o.insert("pcie_plate_inference", pciePlateInference);
+    o.insert("plate_inference_strategy", detRuntime.value("strategy"));
+    o.insert("plate_inference_enabled",
+             detRuntime.value("inference_enabled"));
+    o.insert("plate_display_only", detRuntime.value("display_only"));
+    o.insert("plate_inference_pipeline_enabled",
+             detRuntime.value("pipeline_enabled"));
+    o.insert("plate_inference_pipeline_active",
+             detRuntime.value("pipeline_active"));
+    o.insert("plate_preprocess_backend",
+             detRuntime.value("preprocess_backend"));
+    o.insert("plate_preprocess_requested",
+             detRuntime.value("preprocess_requested"));
+    o.insert("plate_preprocess_fallback_reason",
+             detRuntime.value("preprocess_fallback_reason"));
+    o.insert("plate_det_quantized_output",
+             detRuntime.value("quantized_output"));
+    o.insert("plate_inference_calls_per_cycle",
+             detRuntime.value("task_count"));
+    o.insert("perf_det_pre_ms", detRuntime.value("pre_ms"));
+    o.insert("perf_det_npu_wall_ms", detRuntime.value("npu_wall_ms"));
+    o.insert("perf_det_npu_hw_ms", detRuntime.value("npu_hw_ms"));
+    o.insert("perf_det_post_ms", detRuntime.value("post_ms"));
+    o.insert("perf_det_e2e_ms", detRuntime.value("e2e_ms"));
+    o.insert("perf_det_overlap_saved_ms",
+             detRuntime.value("overlap_saved_ms"));
+    o.insert("perf_det_worker_ms", detRuntime.value("worker_ms"));
+    o.insert("perf_det_overlay_ms", detRuntime.value("overlay_ms"));
+    o.insert("perf_det_task_fps", detRuntime.value("task_fps"));
+    o.insert("perf_det_cycle_fps", detRuntime.value("cycle_fps"));
+    o.insert("perf_det_fps_basis", detRuntime.value("fps_basis"));
+    o.insert("perf_det_fps_window_ms", detRuntime.value("fps_window_ms"));
+    o.insert("plate_infer_configured_stride",
+             detRuntime.value("configured_stride"));
+    o.insert("plate_source_frame_sequence",
+             detRuntime.value("source_frame_sequence"));
+    o.insert("plate_last_detection_source_sequence",
+             detRuntime.value("last_detection_source_sequence"));
+    o.insert("perf_det_result_age_ms", detRuntime.value("result_age_ms"));
+    o.insert("perf_det_task_count", detRuntime.value("task_count"));
+    o.insert("perf_det_score_candidates",
+             detRuntime.value("score_candidates"));
+    o.insert("perf_det_decoded_candidates",
+             detRuntime.value("decoded_candidates"));
+    o.insert("perf_det_final_candidates",
+             detRuntime.value("final_candidates"));
+    o.insert("perf_det_queue_depth", detRuntime.value("queue_depth"));
+    o.insert("perf_det_dropped_tasks", detRuntime.value("dropped_tasks"));
+    o.insert("plate_capture_async", detRuntime.value("capture_async"));
+    o.insert("plate_latest_only", detRuntime.value("latest_only"));
+    o.insert("plate_overlay_max_age_ms",
+             detRuntime.value("overlay_max_age_ms"));
+    o.insert("perf_display_cycle_ms", detRuntime.value("display_cycle_ms"));
+    o.insert("perf_display_fps", detRuntime.value("display_fps"));
+    o.insert("perf_capture_dropped_frames",
+             detRuntime.value("capture_dropped_frames"));
+    if (m_lastFps > 0) o.insert("fps", m_lastFps);
+    if (m_lastCaptureMs > 0) {
+        o.insert("perf_cap_ms", m_lastCaptureMs);
+        o.insert("capture_ms", m_lastCaptureMs);
+        const DriverCaptureMetrics capture = currentDriverCaptureMetrics();
+        o.insert("perf_cap_basis", capture.frameV2
+            ? "dqbuf_wait" : capture.pcie ? "dma_total" : "source_read");
+    }
+    if (m_lastConvMs > 0) o.insert("perf_conv_ms", m_lastConvMs);
+    if (m_lastViewMs > 0) o.insert("perf_view_ms", m_lastViewMs);
+    if (m_lastDetMs > 0) o.insert("perf_det_ms", m_lastDetMs);
+    if (m_lastOcrMs > 0) o.insert("perf_ocr_ms", m_lastOcrMs);
+    if (m_lastEnvMs > 0) o.insert("perf_env_ms", m_lastEnvMs);
+    if (m_lastInferMs > 0) {
+        o.insert("perf_infer_ms", m_lastInferMs);
+        o.insert("infer_ms", m_lastInferMs);
+    }
+    if (m_lastUiMs > 0) o.insert("perf_ui_ms", m_lastUiMs);
+    if (m_lastDispMs > 0) o.insert("perf_disp_ms", m_lastDispMs);
+    if (m_lastTotalMs > 0) o.insert("perf_total_ms", m_lastTotalMs);
+    o.insert("time_bj", nowBjText());
+    m_backendClient->postJson("/api/rk/report/status", o);
+}
+
+void MainWindow::postBusinessSnapshot() {
+    if (!m_backendClient) return;
+    if (!m_businessDlg) return;
+    m_backendClient->postJson("/api/rk/report/business", m_businessDlg->buildBizReport());
+}
+
+void MainWindow::onPlateReport(QImage thumb, QString plate, QString color, QString time, int source, double recConf, double detConf) {
+    if (plate.isEmpty()) return;
+    const PlateCategoryInfo plateCategory = classifyPlateCategory(plate, color);
+    const QString vehicleType = plateCategory.name;
+
+    m_reportRows.append({time, QString::number(source), plate, color, vehicleType,
+                         plateCategory.code, plateCategory.name,
+                         confPercentText(detConf), confPercentText(recConf),
+                         normalizePlateForProtocol(plate), plateCategory.rule,
+                         plateCategoryRuleVersion()});
+    if (!m_businessDlg) {
+        BusinessDialog::Page p = (m_businessSystem == BusinessSystem::Etc) ? BusinessDialog::Page::Etc : BusinessDialog::Page::Parking;
+        m_businessDlg = new BusinessDialog(p, this);
+    }
+    if (m_businessDlg && !m_bizReportConnected) {
+        connect(m_businessDlg, &BusinessDialog::bizReportReady, this, [this](const QJsonObject &payload){
+            if (m_backendClient) {
+                m_backendClient->postJson("/api/rk/report/business", payload);
+            }
+        }, Qt::UniqueConnection);
+        m_bizReportConnected = true;
+    }
+    const QJsonObject bizEvent = m_businessDlg->handlePlateEvent(thumb, plate, time, source, recConf);
+    if (m_ttsPlayer && !bizEvent.isEmpty()) {
+        m_ttsPlayer->enqueueByTemplate(bizEvent.value("system").toString(),
+                                       bizEvent.value("template_key").toString(),
+                                       bizEvent.value("plate").toString(plate),
+                                       bizEvent.value("fee").toDouble(0.0),
+                                       bizEvent.value("need_pay").toDouble(0.0));
+    }
+
+    const bool compact720 = UiSizing::isCompact720(this);
+    QWidget *item = new QWidget(m_plateContainer);
+    item->setProperty("plateItem", true);
+    QVBoxLayout *itemV = new QVBoxLayout(item);
+    itemV->setContentsMargins(compact720 ? 4 : 6, compact720 ? 4 : 6,
+                              compact720 ? 4 : 6, compact720 ? 4 : 6);
+    itemV->setSpacing(compact720 ? 3 : 6);
+
+    QWidget *content = new QWidget(item);
+    QHBoxLayout *h = new QHBoxLayout(content);
+    h->setContentsMargins(0, 0, 0, 0);
+    h->setSpacing(UiSizing::isCompact720(this) ? 5 : 8);
+
+    QLabel *img = new QLabel(item);
+    img->setFixedSize(compact720 ? QSize(128, 64) : QSize(280, 100));
+    img->setAlignment(Qt::AlignCenter);
+    img->setStyleSheet("background-color:#111;");
+    if (!thumb.isNull()) {
+        img->setPixmap(QPixmap::fromImage(thumb).scaled(img->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
+
+    QVBoxLayout *v = new QVBoxLayout();
+    v->setContentsMargins(0, 0, 0, 0);
+    v->setSpacing(2);
+
+    QFont f1("WenQuanYi Zen Hei");
+    f1.setPixelSize(compact720 ? 13 : 16);
+    f1.setBold(true);
+    QFont f2("WenQuanYi Zen Hei");
+    f2.setPixelSize(compact720 ? 10 : 13);
+    f2.setBold(false);
+
+    QLabel *lSrc = new QLabel(QString("输入源%1").arg(source), content);
+    lSrc->setFont(f2);
+    lSrc->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+    QLabel *lTime = new QLabel(time, content);
+    lTime->setFont(f2);
+    lTime->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    lTime->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
+
+    QString c = color.trimmed();
+    if (c.isEmpty()) c = "未知";
+    QLabel *lPlateInfo = new QLabel(QString("%1  %2").arg(plate, c), content);
+    lPlateInfo->setFont(f1);
+    lPlateInfo->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    lPlateInfo->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
+    lPlateInfo->setToolTip(QString("%1 %2").arg(plate, c));
+
+    QLabel *lType = new QLabel(
+        compact720 ? QString("类别: %1").arg(plateCategory.name)
+                   : QString("车牌类别：%1").arg(plateCategory.name), content);
+    lType->setFont(f2);
+    lType->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+    QLabel *lDetConf = new QLabel(
+        compact720 ? QString("检测: %1").arg(confPercentText(detConf))
+                   : QString("检测框置信度：%1").arg(confPercentText(detConf)), content);
+    lDetConf->setFont(f2);
+    lDetConf->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+    QLabel *lRecConf = new QLabel(
+        compact720 ? QString("识别: %1").arg(confPercentText(recConf))
+                   : QString("车牌识别置信度：%1").arg(confPercentText(recConf)), content);
+    lRecConf->setFont(f2);
+    lRecConf->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+    v->addWidget(lSrc);
+    v->addWidget(lTime);
+    v->addWidget(lPlateInfo);
+    v->addWidget(lType);
+    v->addWidget(lDetConf);
+    v->addWidget(lRecConf);
+    v->addStretch();
+
+    h->addWidget(img);
+    h->addLayout(v, 1);
+
+    itemV->addWidget(content);
+    QFrame *sep = new QFrame(item);
+    sep->setFrameShape(QFrame::HLine);
+    sep->setFrameShadow(QFrame::Sunken);
+    sep->setProperty("plateSep", true);
+    itemV->addWidget(sep);
+
+    item->setStyleSheet("border-radius: 6px;");
+    m_plateListLayout->insertWidget(0, item);
+
+    m_plateItems.prepend({thumb, plate, color, time, source, recConf, detConf, item});
+    if (m_plateFilterActive) {
+        bool ok = true;
+        if (m_plateFilterSourceSel > 0) ok = ok && (source == m_plateFilterSourceSel);
+        if (!m_plateFilterRest.isEmpty()) {
+            if (m_plateFilterRest == "*") {
+                if (!m_plateFilterProv.isEmpty() && m_plateFilterProv != "任意") ok = ok && plate.startsWith(m_plateFilterProv);
+            } else {
+                QString key = m_plateFilterRest;
+                if (!m_plateFilterProv.isEmpty() && m_plateFilterProv != "任意") key = m_plateFilterProv + m_plateFilterRest;
+                ok = ok && plate.contains(key, Qt::CaseInsensitive);
+            }
+        } else if (!m_plateFilterProv.isEmpty() && m_plateFilterProv != "任意") {
+            ok = ok && plate.startsWith(m_plateFilterProv);
+        }
+        item->setVisible(ok);
+    }
+
+    while (m_plateListLayout->count() > 80) {
+        QLayoutItem *li = m_plateListLayout->takeAt(m_plateListLayout->count() - 1);
+        if (!li) break;
+        QWidget *w = li->widget();
+        delete li;
+        if (w) w->deleteLater();
+    }
+
+    while (m_plateItems.size() > 80) {
+        m_plateItems.removeLast();
+    }
+
+    if (m_backendClient) {
+        QJsonObject o;
+        o.insert("time_bj", time);
+        o.insert("source", QString("src%1").arg(source));
+        o.insert("source_index", source);
+        o.insert("plate", plate);
+        o.insert("color", color);
+        insertPlateCategoryFields(o, plate, plateCategory);
+        o.insert("det_conf", detConf);
+        o.insert("rec_conf", recConf);
+        o.insert("conf", recConf);
+        o.insert("input_mode", m_inputMode == CaptureThread::InputMode::SdCard ? "sdcard" : "pcie");
+        o.insert("event_schema", "rk3568_plate_event_v2");
+        o.insert("detector_model_name",
+                 QFileInfo(QString::fromLocal8Bit(yolo_detection_model_path())).fileName());
+        o.insert("detector_profile", yolo_current_detector_profile_key());
+        o.insert("detector_profile_id", yolo_current_detector_profile());
+        o.insert("detector_family", yolo_current_detector_family());
+        o.insert("detector_output_contract",
+                 yolo_current_detector_output_contract());
+        o.insert("detector_runtime_backend", "cpp_rknn_npu");
+        o.insert("recognizer_model_name",
+                 QFileInfo(QString::fromLocal8Bit(yolo_recognition_model_path())).fileName());
+        o.insert("recognizer_profile", yolo_current_recognizer_profile_key());
+        o.insert("recognizer_profile_id", yolo_current_recognizer_profile());
+        o.insert("recognizer_output_contract",
+                 yolo_current_recognizer_output_contract());
+        o.insert("recognizer_input_width",
+                 yolo_current_recognizer_input_width());
+        o.insert("recognizer_input_height",
+                 yolo_current_recognizer_input_height());
+        o.insert("recognizer_input_format",
+                 yolo_current_recognizer_input_format());
+        o.insert("recognizer_model_input_type",
+                 yolo_current_recognizer_model_input_type());
+        o.insert("recognizer_text_layout",
+                 yolo_current_recognizer_text_layout());
+        o.insert("recognizer_runtime_backend", "cpp_rknn_npu");
+        o.insert("model_input_width", yolo_current_detector_input_width());
+        o.insert("model_input_height", yolo_current_detector_input_height());
+        o.insert("model_input_format", "RGB888");
+        o.insert("inference_strategy",
+                 m_lastDetRuntimeMetrics.value("strategy").toString());
+        o.insert("inference_task_count",
+                 m_lastDetRuntimeMetrics.value("task_count"));
+        o.insert("inference_pipeline_active",
+                 m_lastDetRuntimeMetrics.value("pipeline_active"));
+        o.insert("inference_capture_async",
+                 m_lastDetRuntimeMetrics.value("capture_async"));
+        o.insert("inference_latest_only",
+                 m_lastDetRuntimeMetrics.value("latest_only"));
+        o.insert("inference_queue_depth",
+                 m_lastDetRuntimeMetrics.value("queue_depth"));
+        o.insert("inference_dropped_tasks",
+                 m_lastDetRuntimeMetrics.value("dropped_tasks"));
+        o.insert("inference_result_age_ms",
+                 m_lastDetRuntimeMetrics.value("result_age_ms"));
+        o.insert("display_fps",
+                 m_lastDetRuntimeMetrics.value("display_fps"));
+        o.insert("inference_pre_ms", m_lastDetRuntimeMetrics.value("pre_ms"));
+        o.insert("inference_npu_ms", m_lastDetRuntimeMetrics.value("npu_wall_ms"));
+        o.insert("inference_post_ms", m_lastDetRuntimeMetrics.value("post_ms"));
+        o.insert("inference_score_candidates",
+                 m_lastDetRuntimeMetrics.value("score_candidates"));
+        o.insert("inference_decoded_candidates",
+                 m_lastDetRuntimeMetrics.value("decoded_candidates"));
+        o.insert("inference_final_candidates",
+                 m_lastDetRuntimeMetrics.value("final_candidates"));
+        o.insert("source_frame_width", m_inputMode == CaptureThread::InputMode::Pcie ? 640 : 0);
+        o.insert("source_frame_height", m_inputMode == CaptureThread::InputMode::Pcie ? 360 : 0);
+        o.insert("source_frame_format", "BGR888");
+        o.insert("source_layout", m_inputMode == CaptureThread::InputMode::Pcie ? "2x2" : "single");
+        o.insert("source_mask", m_inputMode == CaptureThread::InputMode::Pcie ? 0x0f : 0x01);
+        o.insert("pcie_sliding_enabled", false);
+        if (m_inputMode == CaptureThread::InputMode::SdCard && !m_sdSourcePath.isEmpty()) {
+            o.insert("sd_source_path", m_sdSourcePath);
+        }
+        const QString targetDeviceId = targetDeviceIdForSource(source, m_runtimeSettings);
+        const QString targetMac = targetMacForSource(source);
+        if (!targetDeviceId.isEmpty()) o.insert("target_device_id", targetDeviceId);
+        if (!targetMac.isEmpty()) o.insert("target_mac", targetMac);
+        int uploadThumb = 1;
+        if (const char* s = std::getenv("RK3568_PLATE_UPLOAD_THUMB")) uploadThumb = std::atoi(s);
+        if (uploadThumb != 0 && !thumb.isNull()) {
+            QByteArray buf;
+            QBuffer qb(&buf);
+            qb.open(QIODevice::WriteOnly);
+            thumb.save(&qb, "JPG", 80);
+            if (!buf.isEmpty()) o.insert("thumb_jpeg_base64", QString::fromLatin1(buf.toBase64()));
+        }
+        m_backendClient->postJson("/api/rk/report/plate", o);
+    }
+}
+
+void MainWindow::openParking() {
+    if (m_businessSystem != BusinessSystem::Parking) return;
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("360°图像融合"));
+    dialog.setModal(true);
+    dialog.resize(760, 820);
+    dialog.setStyleSheet(QStringLiteral(
+        "QDialog { background: #111820; color: #e8eef2; }"
+        "QLabel#surroundStatus { color: #73d9c5; padding: 4px; }"
+        "QPushButton { min-height: 34px; padding: 0 18px; }"));
+
+    auto *layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(12, 12, 12, 12);
+    layout->setSpacing(8);
+    auto *imageLabel = new QLabel(&dialog);
+    imageLabel->setAlignment(Qt::AlignCenter);
+    imageLabel->setMinimumSize(520, 520);
+    imageLabel->setStyleSheet(QStringLiteral("background: #0b1117;"));
+    auto *statusLabel = new QLabel(QStringLiteral("等待四路采集画面…"), &dialog);
+    statusLabel->setObjectName(QStringLiteral("surroundStatus"));
+    auto *closeButton = new QPushButton(QStringLiteral("关闭"), &dialog);
+    layout->addWidget(imageLabel, 1);
+    layout->addWidget(statusLabel);
+    layout->addWidget(closeButton, 0, Qt::AlignRight);
+    QObject::connect(closeButton, &QPushButton::clicked, &dialog, &QDialog::accept);
+
+    constexpr int outputSize = 640;
+    constexpr double innerRatio = 0.17;
+    constexpr double outerRatio = 0.49;
+    constexpr double fisheyeFovDeg = 190.0;
+    constexpr double sectorHalfDeg = 58.0;
+    constexpr double sectorFeatherDeg = 10.0;
+    constexpr double nearRatio = 0.94;
+    constexpr double farRatio = -0.52;
+    const std::array<double, 4> yawDeg{{0.0, 180.0, -90.0, 90.0}};
+    std::array<cv::Mat, 4> mapX, mapY, weights, weight3;
+    cv::Mat ringMask(outputSize, outputSize, CV_8UC1, cv::Scalar(0));
+    bool mapsReady = false;
+    int tileWidth = 0;
+    int tileHeight = 0;
+
+    auto buildMaps = [&](int sourceWidth, int sourceHeight) {
+        tileWidth = sourceWidth;
+        tileHeight = sourceHeight;
+        const double cx = (sourceWidth - 1) * 0.5;
+        const double cy = (sourceHeight - 1) * 0.5;
+        const double rx = sourceWidth * 0.5;
+        const double ry = sourceHeight * 0.5;
+        const double center = (outputSize - 1) * 0.5;
+        const double inner = innerRatio * outputSize;
+        const double outer = outerRatio * outputSize;
+        const double halfFov = fisheyeFovDeg * CV_PI / 360.0;
+        const double sectorHalf = sectorHalfDeg * CV_PI / 180.0;
+        const double sectorFeather = sectorFeatherDeg * CV_PI / 180.0;
+        for (int y = 0; y < outputSize; ++y) {
+            uchar *maskBytes = ringMask.ptr<uchar>(y);
+            const double dy = y - center;
+            for (int x = 0; x < outputSize; ++x) {
+                const double dx = x - center;
+                const double radius = std::hypot(dx, dy);
+                if (radius >= inner && radius <= outer) maskBytes[x] = 255;
+            }
+        }
+        for (int camera = 0; camera < 4; ++camera) {
+            mapX[camera] = cv::Mat(outputSize, outputSize, CV_32FC1);
+            mapY[camera] = cv::Mat(outputSize, outputSize, CV_32FC1);
+            weights[camera] = cv::Mat(outputSize, outputSize, CV_32FC1, cv::Scalar(0));
+            for (int y = 0; y < outputSize; ++y) {
+                float *mx = mapX[camera].ptr<float>(y);
+                float *my = mapY[camera].ptr<float>(y);
+                float *weight = weights[camera].ptr<float>(y);
+                const double dy = y - center;
+                for (int x = 0; x < outputSize; ++x) {
+                    const double dx = x - center;
+                    const double radius = std::hypot(dx, dy);
+                    const double radial = std::clamp((radius - inner) / (outer - inner), 0.0, 1.0);
+                    const double theta = std::atan2(dx, -dy);
+                    double relative = theta - yawDeg[camera] * CV_PI / 180.0;
+                    relative = std::remainder(relative, 2.0 * CV_PI);
+                    const double u = cx + rx * std::clamp(relative / halfFov, -1.0, 1.0);
+                    const double v = cy + ry * (nearRatio + (farRatio - nearRatio) * radial);
+                    mx[x] = static_cast<float>(u);
+                    my[x] = static_cast<float>(v);
+                    if (radius < inner || radius > outer || u < 0 || u >= sourceWidth - 1 ||
+                        v < 0 || v >= sourceHeight - 1) continue;
+                    const double angular = std::clamp((sectorHalf - std::abs(relative)) / sectorFeather, 0.0, 1.0);
+                    const double sourceRadius = std::hypot((u - cx) / rx, (v - cy) / ry);
+                    if (sourceRadius <= 0.96) weight[x] = static_cast<float>(angular);
+                }
+            }
+            cv::Mat channels[] = {weights[camera], weights[camera], weights[camera]};
+            cv::merge(channels, 3, weight3[camera]);
+        }
+        mapsReady = true;
+    };
+
+    QTimer refreshTimer(&dialog);
+    QObject::connect(&refreshTimer, &QTimer::timeout, &dialog, [this, imageLabel, statusLabel,
+                                                               &buildMaps, &mapsReady, &tileWidth,
+                                                               &tileHeight, &mapX, &mapY, &weights,
+                                                               &weight3, &ringMask]() {
+        if (!m_captureThread) {
+            statusLabel->setText(QStringLiteral("采集线程不可用"));
+            return;
+        }
+        QImage mosaic;
+        QJsonObject metadata;
+        if (!m_captureThread->latestFrameRgb24(mosaic, metadata) || mosaic.isNull() ||
+            mosaic.width() < 2 || mosaic.height() < 2) {
+            statusLabel->setText(QStringLiteral("等待四路采集画面…"));
+            return;
+        }
+        mosaic = mosaic.convertToFormat(QImage::Format_RGB888);
+        const int halfWidth = mosaic.width() / 2;
+        const int halfHeight = mosaic.height() / 2;
+        if (halfWidth < 2 || halfHeight < 2) return;
+        if (!mapsReady || tileWidth != halfWidth || tileHeight != halfHeight)
+            buildMaps(halfWidth, halfHeight);
+
+        cv::Mat frame(mosaic.height(), mosaic.width(), CV_8UC3, mosaic.bits(),
+                      static_cast<size_t>(mosaic.bytesPerLine()));
+        // PCIe tile order is fixed: 1=front, 2=rear, 3=left, 4=right.
+        const std::array<cv::Mat, 4> sources{{
+            frame(cv::Rect(0, 0, halfWidth, halfHeight)),
+            frame(cv::Rect(halfWidth, 0, halfWidth, halfHeight)),
+            frame(cv::Rect(0, halfHeight, halfWidth, halfHeight)),
+            frame(cv::Rect(halfWidth, halfHeight, halfWidth, halfHeight))
+        }};
+        cv::Mat accumulated(outputSize, outputSize, CV_32FC3, cv::Scalar(0, 0, 0));
+        cv::Mat weightSum(outputSize, outputSize, CV_32FC1, cv::Scalar(0));
+        for (int camera = 0; camera < 4; ++camera) {
+            cv::Mat warped, warpedFloat, weighted;
+            cv::remap(sources[camera], warped, mapX[camera], mapY[camera], cv::INTER_LINEAR,
+                      cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
+            warped.convertTo(warpedFloat, CV_32FC3);
+            cv::multiply(warpedFloat, weight3[camera], weighted);
+            accumulated += weighted;
+            weightSum += weights[camera];
+        }
+        cv::Mat safeWeight, safeWeight3, normalized, output;
+        cv::max(weightSum, 1.0e-6, safeWeight);
+        cv::Mat safeChannels[] = {safeWeight, safeWeight, safeWeight};
+        cv::merge(safeChannels, 3, safeWeight3);
+        cv::divide(accumulated, safeWeight3, normalized);
+        normalized.convertTo(output, CV_8UC3);
+        output.setTo(cv::Scalar(12, 20, 29), ringMask == 0);
+
+        const int center = outputSize / 2;
+        const int inner = static_cast<int>(innerRatio * outputSize);
+        const int outer = static_cast<int>(outerRatio * outputSize);
+        cv::circle(output, cv::Point(center, center), inner + 7, cv::Scalar(7, 14, 22), -1, cv::LINE_AA);
+        const std::vector<cv::Point> vehicle{{center - 48, center - 86}, {center + 48, center - 86},
+            {center + 72, center - 50}, {center + 72, center + 72}, {center + 48, center + 88},
+            {center - 48, center + 88}, {center - 72, center + 72}, {center - 72, center - 50}};
+        cv::fillPoly(output, std::vector<std::vector<cv::Point>>{vehicle}, cv::Scalar(7, 14, 22));
+        cv::polylines(output, vehicle, true, cv::Scalar(150, 220, 245), 2, cv::LINE_AA);
+        cv::arrowedLine(output, cv::Point(center, center - inner - 8),
+                        cv::Point(center, center - inner - 34), cv::Scalar(90, 210, 250), 3,
+                        cv::LINE_AA, 0, 0.45);
+        cv::circle(output, cv::Point(center, center), outer, cv::Scalar(60, 100, 125), 2, cv::LINE_AA);
+        cv::putText(output, "FRONT", cv::Point(center - 38, 32), cv::FONT_HERSHEY_SIMPLEX, 0.55,
+                    cv::Scalar(235, 242, 248), 2, cv::LINE_AA);
+        cv::putText(output, "REAR", cv::Point(center - 30, outputSize - 18), cv::FONT_HERSHEY_SIMPLEX,
+                    0.55, cv::Scalar(235, 242, 248), 2, cv::LINE_AA);
+        cv::putText(output, "LEFT", cv::Point(12, center + 5), cv::FONT_HERSHEY_SIMPLEX, 0.5,
+                    cv::Scalar(235, 242, 248), 2, cv::LINE_AA);
+        cv::putText(output, "RIGHT", cv::Point(outputSize - 78, center + 5), cv::FONT_HERSHEY_SIMPLEX,
+                    0.5, cv::Scalar(235, 242, 248), 2, cv::LINE_AA);
+        const QImage result(output.data, output.cols, output.rows, static_cast<int>(output.step),
+                            QImage::Format_RGB888);
+        imageLabel->setPixmap(QPixmap::fromImage(result.copy()).scaled(
+            imageLabel->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        statusLabel->setText(QStringLiteral("四路实时融合  |  1前  2后  3左  4右"));
+    });
+    refreshTimer.start(50);
+    dialog.exec();
+}
+
+void MainWindow::openEtc() {
+    if (m_businessSystem != BusinessSystem::Etc) return;
+    if (!m_businessDlg) m_businessDlg = new BusinessDialog(BusinessDialog::Page::Etc, this);
+    if (m_businessDlg && !m_bizReportConnected) {
+        connect(m_businessDlg, &BusinessDialog::bizReportReady, this, [this](const QJsonObject &payload){
+            if (m_backendClient) {
+                m_backendClient->postJson("/api/rk/report/business", payload);
+            }
+        }, Qt::UniqueConnection);
+        m_bizReportConnected = true;
+    }
+    m_businessDlg->setPage(BusinessDialog::Page::Etc);
+    m_businessDlg->show();
+    m_businessDlg->raise();
+    m_businessDlg->activateWindow();
+}
+
+void MainWindow::openPerf() {
+    if (!m_developerMode) return;
+    if (!m_perfDlg) m_perfDlg = new PerfDialog(this);
+    if (!m_lastDetRuntimeMetrics.isEmpty()) {
+        m_perfDlg->setDetRuntime(m_lastDetRuntimeMetrics);
+    }
+    {
+        const DriverCaptureMetrics capture = currentDriverCaptureMetrics();
+        m_perfDlg->setPcieMetrics(m_lastPcieRxFrames, capture.actualRxFps,
+                                  capture.frameIntervalMs, capture.dmaWaitMs,
+                                  capture.frameV2);
+    }
+    m_perfDlg->show();
+    m_perfDlg->raise();
+    m_perfDlg->activateWindow();
+}
+
+void MainWindow::openDriverStatus() {
+    if (!m_driverDlg) m_driverDlg = new DriverStatusDialog(this);
+    m_driverDlg->show();
+    m_driverDlg->raise();
+    m_driverDlg->activateWindow();
+}
+
+// --- 开始/停止采集控制 ---
+void MainWindow::handleStartStop() {
+    if (!m_isCapturing) {
+        if (!ensureSdSourceReady()) return;
+        m_lastPcieRxFrames = 0;
+        if (m_perfDlg) m_perfDlg->setPcieMetrics(0, 0.0, 0.0, 0.0, false);
+        m_captureThread->startCapture();
+        m_controlBtn->setText("停止采集");
+        m_isCapturing = true;
+        configureRoadMode();
+    } else {
+        m_captureThread->stop();
+        m_controlBtn->setEnabled(false);
+        m_controlBtn->setText("正在停止...");
+    }
+    postStatus("", true);
+}
+
+// --- 设置窗口 (白底黑字工业风 + 千分位百分比调节) ---
+void MainWindow::openSettings() {
+    QDialog dialog(this);
+    dialog.setWindowTitle("算法参数精细调节");
+    dialog.setMinimumSize(460, 400);
+    UiSizing::fitWindow(&dialog, QSize(680, 620), 24);
+    
+    // ================== 1. 全局样式瘦身 (11px 紧凑风格) ==================
+    dialog.setStyleSheet(R"(
+        QDialog { background-color: #ffffff; color: #000000; }
+        QLabel { color: #333333; font-size: 11px; border: none; }
+        QTabWidget::pane { border: 1px solid #cccccc; background: white; }
+        QTabBar::tab { 
+            background: #f8f8f8; color: #666; padding: 6px 12px; min-width: 80px; 
+            border: 1px solid #ccc; border-bottom: none; font-size: 11px;
+        }
+        QTabBar::tab:selected { background: #ffffff; color: #000; font-weight: bold; }
+        
+        /* 滑块瘦身 */
+        QSlider::groove:horizontal { height: 4px; background: #eee; border-radius: 2px; }
+        QSlider::handle:horizontal { 
+            background: #444; border: 1px solid #222; width: 12px; height: 12px; 
+            margin: -4px 0; border-radius: 6px; 
+        }
+
+        /* 按钮：根据 4 个汉字智能适配 */
+        QPushButton { 
+            background: #f5f5f5; border: 1px solid #ccc; border-radius: 2px; 
+            font-size: 11px; 
+            padding: 4px 12px; /* 左右 12px 确保比 4 个字略大一点 */
+            min-height: 22px;
+        }
+        QPushButton:hover { background: #e8e8e8; border-color: #999; }
+        QComboBox { 
+            border: 1px solid #ccc; padding: 2px 4px; 
+            background: #ffffff; color: #000000; font-size: 11px; 
+        }
+        QComboBox QAbstractItemView {
+            background: #ffffff;
+            color: #000000;
+            selection-background-color: #d9d9d9;
+            selection-color: #000000;
+            outline: 0;
+        }
+    )");
+
+    QVBoxLayout *mainLayout = new QVBoxLayout(&dialog);
+    mainLayout->setContentsMargins(10, 10, 10, 10);
+    mainLayout->setSpacing(8);
+
+    QTabWidget *tabWidget = new QTabWidget(&dialog);
+
+    // --- 助手函数：创建更紧凑的行布局 ---
+    auto setupRow = [](QHBoxLayout* h) {
+        h->setContentsMargins(0, 1, 0, 1);
+        h->setSpacing(10);
+    };
+
+    // 助手：百分比滑块
+    auto createPercentSlider = [this, &setupRow](QWidget* p, QString lab, int min, int max, int cur, auto func) {
+        QWidget* row = new QWidget(p);
+        QHBoxLayout* h = new QHBoxLayout(row); setupRow(h);
+        QLabel* t = new QLabel(lab); t->setFixedWidth(130);
+        QSlider* s = new QSlider(Qt::Horizontal); s->setRange(min, max); s->setValue(cur);
+        QLabel* v = new QLabel(QString("%1%").arg(cur / 10.0, 0, 'f', 1));
+        v->setFixedWidth(40); v->setAlignment(Qt::AlignRight);
+        h->addWidget(t); h->addWidget(s); h->addWidget(v);
+        connect(s, &QSlider::valueChanged, this, [=](int val){
+            v->setText(QString("%1%").arg(val / 10.0, 0, 'f', 1)); func(val); 
+        });
+        return row;
+    };
+
+    // 助手：整数滑块
+    auto createIntSlider = [this, &setupRow](QWidget* p, QString lab, int min, int max, int cur, auto func) {
+        QWidget* row = new QWidget(p);
+        QHBoxLayout* h = new QHBoxLayout(row); setupRow(h);
+        QLabel* t = new QLabel(lab); t->setFixedWidth(130);
+        QSlider* s = new QSlider(Qt::Horizontal); s->setRange(min, max); s->setValue(cur);
+        QLabel* v = new QLabel(QString::number(cur));
+        v->setFixedWidth(40); v->setAlignment(Qt::AlignRight);
+        h->addWidget(t); h->addWidget(s); h->addWidget(v);
+        connect(s, &QSlider::valueChanged, this, [=](int val){
+            v->setText(QString::number(val)); func(val); 
+        });
+        return row;
+    };
+
+    auto persistRuntimeSettings = [this]() {
+        saveRuntimeSettings(m_runtimeSettings);
+        applyRuntimeSettingsToProcess(m_runtimeSettings);
+    };
+
+    // Keep model selection on the first page so it is visible on a 720p
+    // display without scrolling through inference controls.
+    QWidget *modelTab = new QWidget();
+    QVBoxLayout *modelTabLayout = new QVBoxLayout(modelTab);
+    modelTabLayout->setContentsMargins(16, 16, 16, 16);
+    modelTabLayout->setSpacing(12);
+    modelTabLayout->addWidget(new QLabel(
+        "<b>当前环境检测模型（C++ / RKNN NPU）</b>"));
+    QLabel *environmentModelDetails = new QLabel(modelTab);
+    environmentModelDetails->setWordWrap(true);
+    environmentModelDetails->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    environmentModelDetails->setStyleSheet(
+        "QLabel { background:#f7f7f7; border:1px solid #d4d4d4; "
+        "padding:10px; color:#222222; }");
+    environmentModelDetails->setText(
+        "ADAS 可独立选择，支持多选和全选：\n"
+        "行人及车辆（7类）：bdd7_rk3568_fp16.rknn\n"
+        "交通线（虚线、实线）：lane_rk3568_fp16.rknn\n"
+        "红绿灯（17类）：traffic_rk3568_fp16.rknn\n"
+        "导航：nav_video7_v4_rk3568_w8a8.rknn（12类）\n"
+        "ADAS 输入：640 x 640 RGB UINT8 NHWC，黑边等比缩放；"
+        "输出为概率，不重复 sigmoid；运行后端：C++ / RKNN / RK3568 NPU");
+    modelTabLayout->addWidget(environmentModelDetails);
+    QWidget *detectorModelRow = new QWidget(modelTab);
+    QHBoxLayout *detectorModelLayout = new QHBoxLayout(detectorModelRow);
+    setupRow(detectorModelLayout);
+    QLabel *detectorModelLabel = new QLabel("检测模型:");
+    detectorModelLabel->setFixedWidth(130);
+    QComboBox *detectorModelBox = new QComboBox(detectorModelRow);
+    for (const plate_detector::Profile &profile : plate_detector::profiles()) {
+        detectorModelBox->addItem(
+            QString::fromUtf8(profile.display_name),
+            plate_detector::profileToInt(profile.id));
+    }
+    detectorModelBox->setCurrentIndex(
+        detectorModelBox->findData(m_runtimeSettings.detectorProfile));
+    detectorModelBox->setEnabled(!m_isCapturing);
+    detectorModelBox->setToolTip(
+        m_isCapturing
+            ? "请先停止采集，再切换和预热模型"
+            : "切换时在 C++ 中重新初始化一次 RKNN 上下文并预热；逐帧推理不加载 Python");
+    QLabel *detectorModelDetails = new QLabel(modelTab);
+    detectorModelDetails->setWordWrap(true);
+    detectorModelDetails->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    detectorModelDetails->setStyleSheet(
+        "QLabel { background:#f7f7f7; border:1px solid #d4d4d4; "
+        "padding:10px; color:#222222; }");
+    auto updateDetectorDetails = [detectorModelBox, detectorModelDetails](int index) {
+        const int profileValue = detectorModelBox->itemData(index).toInt();
+        const plate_detector::Profile &profile = plate_detector::profile(
+            plate_detector::profileFromInt(profileValue));
+        detectorModelDetails->setText(
+            QString("文件：%1\n模型族：%2\n输入：%3 x %4 RGB UINT8 NHWC\n后处理：%5\n运行后端：C++ / RKNN / RK3568 NPU")
+                .arg(QString::fromUtf8(profile.model_file))
+                .arg(QString::fromLatin1(profile.family_name))
+                .arg(profile.input_width)
+                .arg(profile.input_height)
+                .arg(QString::fromLatin1(profile.output_contract)));
+    };
+    updateDetectorDetails(detectorModelBox->currentIndex());
+    connect(detectorModelBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this, persistRuntimeSettings, detectorModelBox,
+                   updateDetectorDetails](int index) {
+        const int requested = detectorModelBox->itemData(index).toInt();
+        if (requested == m_runtimeSettings.detectorProfile) return;
+        if (m_isCapturing) return;
+        const int previous = m_runtimeSettings.detectorProfile;
+        m_runtimeSettings.detectorProfile = requested;
+        persistRuntimeSettings();
+        std::string reloadError;
+        if (!yolo_reload_detector_profile(requested, reloadError)) {
+            m_runtimeSettings.detectorProfile = previous;
+            persistRuntimeSettings();
+            detectorModelBox->blockSignals(true);
+            detectorModelBox->setCurrentIndex(
+                detectorModelBox->findData(previous));
+            detectorModelBox->blockSignals(false);
+            updateDetectorDetails(detectorModelBox->currentIndex());
+            QMessageBox::critical(
+                this, "模型切换失败",
+                QString::fromLocal8Bit(reloadError.c_str()));
+            return;
+        }
+        static_cast<ElidedLabel *>(m_modelLabel)->setFullText(
+            QString("模型: %1 | OCR: %2")
+                .arg(yolo_current_detector_model_name())
+                .arg(yolo_current_recognizer_model_name()));
+        updateDetectorDetails(index);
+        postStatus("", true);
+    });
+    detectorModelLayout->addWidget(detectorModelLabel);
+    detectorModelLayout->addWidget(detectorModelBox, 1);
+    modelTabLayout->addWidget(detectorModelRow);
+    modelTabLayout->addWidget(detectorModelDetails);
+
+    QWidget *recognizerModelRow = new QWidget(modelTab);
+    QHBoxLayout *recognizerModelLayout = new QHBoxLayout(recognizerModelRow);
+    setupRow(recognizerModelLayout);
+    QLabel *recognizerModelLabel = new QLabel("OCR模型:");
+    recognizerModelLabel->setFixedWidth(130);
+    QComboBox *recognizerModelBox = new QComboBox(recognizerModelRow);
+    for (const plate_recognizer::Profile &profile :
+         plate_recognizer::profiles()) {
+        recognizerModelBox->addItem(
+            QString::fromUtf8(profile.display_name),
+            plate_recognizer::profileToInt(profile.id));
+    }
+    recognizerModelBox->setCurrentIndex(
+        recognizerModelBox->findData(m_runtimeSettings.recognizerProfile));
+    recognizerModelBox->setEnabled(!m_isCapturing);
+    recognizerModelBox->setToolTip(
+        m_isCapturing
+            ? "请先停止采集，再切换 OCR 模型"
+            : "切换时校验 168x48 输入、78x21 文字分支和 5 类颜色分支，并预热 RKNN NPU");
+    QLabel *recognizerModelDetails = new QLabel(modelTab);
+    recognizerModelDetails->setWordWrap(true);
+    recognizerModelDetails->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    recognizerModelDetails->setStyleSheet(
+        "QLabel { background:#f7f7f7; border:1px solid #d4d4d4; "
+        "padding:10px; color:#222222; }");
+    auto updateRecognizerDetails =
+        [recognizerModelBox, recognizerModelDetails](int index) {
+        const int profileValue = recognizerModelBox->itemData(index).toInt();
+        const plate_recognizer::Profile &profile =
+            plate_recognizer::profile(
+                plate_recognizer::profileFromInt(profileValue));
+        recognizerModelDetails->setText(
+            QString("文件: %1\n输入: 168 x 48 %2 UINT8 NHWC\n输出: %3\n运行后端: C++ / RKNN / RK3568 NPU")
+                .arg(QString::fromUtf8(profile.model_file))
+                .arg(profile.input_bgr ? "BGR" : "RGB")
+                .arg(QString::fromUtf8(profile.output_contract)));
+    };
+    updateRecognizerDetails(recognizerModelBox->currentIndex());
+    connect(recognizerModelBox,
+            QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [this, persistRuntimeSettings, recognizerModelBox,
+             updateRecognizerDetails](int index) {
+        const int requested = recognizerModelBox->itemData(index).toInt();
+        updateRecognizerDetails(index);
+        if (requested == m_runtimeSettings.recognizerProfile) return;
+        if (m_isCapturing) return;
+        const int previous = m_runtimeSettings.recognizerProfile;
+        m_runtimeSettings.recognizerProfile = requested;
+        persistRuntimeSettings();
+        std::string reloadError;
+        if (!yolo_reload_recognizer_profile(requested, reloadError)) {
+            m_runtimeSettings.recognizerProfile = previous;
+            persistRuntimeSettings();
+            recognizerModelBox->blockSignals(true);
+            recognizerModelBox->setCurrentIndex(
+                recognizerModelBox->findData(previous));
+            recognizerModelBox->blockSignals(false);
+            updateRecognizerDetails(recognizerModelBox->currentIndex());
+            QMessageBox::critical(
+                this, "OCR模型切换失败",
+                QString::fromLocal8Bit(reloadError.c_str()));
+            return;
+        }
+        static_cast<ElidedLabel *>(m_modelLabel)->setFullText(
+            QString("模型: %1 | OCR: %2")
+                .arg(yolo_current_detector_model_name())
+                .arg(yolo_current_recognizer_model_name()));
+        postStatus("", true);
+    });
+    recognizerModelLayout->addWidget(recognizerModelLabel);
+    recognizerModelLayout->addWidget(recognizerModelBox, 1);
+    modelTabLayout->addWidget(recognizerModelRow);
+    modelTabLayout->addWidget(recognizerModelDetails);
+    // The current deployment runs the environment pipeline. Keep the legacy
+    // plate controls in code for compatibility modes, but do not expose them
+    // on the active environment-model page.
+    detectorModelRow->setVisible(false);
+    detectorModelDetails->setVisible(false);
+    recognizerModelRow->setVisible(false);
+    recognizerModelDetails->setVisible(false);
+    QLabel *modelSwitchHint = new QLabel(
+        m_isCapturing
+            ? "当前正在采集，请先停止采集后再切换模型。"
+            : "当前页面显示环境检测模型；车牌 YOLOv5/OCR 配置仅保留给兼容模式。",
+        modelTab);
+    modelSwitchHint->setWordWrap(true);
+    modelTabLayout->addWidget(modelSwitchHint);
+    modelTabLayout->addStretch();
+    tabWidget->addTab(modelTab, "模型选择");
+
+    // ================== Tab 2: 推理控制 ==================
+    QWidget *infContent = new QWidget();
+    QVBoxLayout *infL = new QVBoxLayout(infContent);
+
+    QCheckBox *globalInferenceBox = new QCheckBox(
+        "通用/车牌识别已关闭（仅按需运行 ADAS 或导航）", infContent);
+    globalInferenceBox->setChecked(false);
+    globalInferenceBox->setEnabled(false);
+    globalInferenceBox->setToolTip(
+        "关闭后仍保留 PCIe/SD 采集、RGB565 转换、预览和 GUI 刷新，"
+        "但跳过 YOLO、OCR、环境模型和识别上报，用于定位采集/显示链路问题。");
+    connect(globalInferenceBox, &QCheckBox::toggled, this,
+            [this, persistRuntimeSettings](bool enabled) {
+        m_runtimeSettings.globalInferenceEnabled = enabled;
+        persistRuntimeSettings();
+        if (m_captureThread) {
+            m_captureThread->setGlobalInferenceEnabled(enabled);
+            m_expectedDisplayConfigVersion =
+                m_captureThread->displayConfigVersion();
+        }
+        postStatus(enabled ? "全局推理已开启" : "仅采集显示模式已开启", true);
+    });
+    infL->addWidget(globalInferenceBox);
+    infL->addWidget(new QLabel("<b>模型检测与识别阈值</b>"));
+    infL->addWidget(createPercentSlider(infContent, "车牌最终置信度:", 10, 999, (int)(m_currentConf*1000), [this, persistRuntimeSettings](int v){
+        m_currentConf = v / 1000.0f;
+        m_runtimeSettings.plateConf = m_currentConf;
+        persistRuntimeSettings();
+    }));
+
+    QCheckBox *pose26HeadConfBox = new QCheckBox(
+        "启用 Pose26 P3/P4/P5 独立置信度", infContent);
+    pose26HeadConfBox->setChecked(m_runtimeSettings.pose26HeadConfEnabled);
+    pose26HeadConfBox->setToolTip(
+        "仅作用于 YOLO26/Pose26 九路输出。各层阈值用于 NMS 前筛选，"
+        "车牌最终置信度仍是统一下限；V5 模型不受此项影响。");
+    QWidget *pose26P3Row = createPercentSlider(
+        infContent, "Pose26 P3置信度:", 1, 999,
+        static_cast<int>(m_runtimeSettings.pose26P3Conf * 1000.0f),
+        [this, persistRuntimeSettings](int v) {
+            m_runtimeSettings.pose26P3Conf = v / 1000.0f;
+            persistRuntimeSettings();
+        });
+    QWidget *pose26P4Row = createPercentSlider(
+        infContent, "Pose26 P4置信度:", 1, 999,
+        static_cast<int>(m_runtimeSettings.pose26P4Conf * 1000.0f),
+        [this, persistRuntimeSettings](int v) {
+            m_runtimeSettings.pose26P4Conf = v / 1000.0f;
+            persistRuntimeSettings();
+        });
+    QWidget *pose26P5Row = createPercentSlider(
+        infContent, "Pose26 P5置信度:", 1, 999,
+        static_cast<int>(m_runtimeSettings.pose26P5Conf * 1000.0f),
+        [this, persistRuntimeSettings](int v) {
+            m_runtimeSettings.pose26P5Conf = v / 1000.0f;
+            persistRuntimeSettings();
+        });
+    const auto setPose26HeadRowsEnabled =
+        [pose26P3Row, pose26P4Row, pose26P5Row](bool enabled) {
+            pose26P3Row->setEnabled(enabled);
+            pose26P4Row->setEnabled(enabled);
+            pose26P5Row->setEnabled(enabled);
+        };
+    setPose26HeadRowsEnabled(m_runtimeSettings.pose26HeadConfEnabled);
+    connect(pose26HeadConfBox, &QCheckBox::toggled, this,
+            [this, persistRuntimeSettings,
+             setPose26HeadRowsEnabled](bool enabled) {
+        m_runtimeSettings.pose26HeadConfEnabled = enabled;
+        setPose26HeadRowsEnabled(enabled);
+        persistRuntimeSettings();
+        postStatus("", true);
+    });
+    infL->addWidget(pose26HeadConfBox);
+    infL->addWidget(pose26P3Row);
+    infL->addWidget(pose26P4Row);
+    infL->addWidget(pose26P5Row);
+
+    infL->addWidget(createPercentSlider(infContent, "环境框置信度:", 10, 999, (int)(m_runtimeSettings.envConf*1000), [this, persistRuntimeSettings](int v){
+        m_runtimeSettings.envConf = v / 1000.0f;
+        persistRuntimeSettings();
+    }));
+    infL->addWidget(createPercentSlider(infContent, "文字识别阈值:", 100, 999, g_color_cfg.rec_conf_threshold, [this, persistRuntimeSettings](int v){
+        m_runtimeSettings.recConfThreshold = v;
+        persistRuntimeSettings();
+    }));
+
+    infL->addWidget(createIntSlider(
+        infContent, "OCR最小短边(px):", 4, 80,
+        m_runtimeSettings.plateMinShortEdge,
+        [this, persistRuntimeSettings](int v) {
+            m_runtimeSettings.plateMinShortEdge = v;
+            persistRuntimeSettings();
+        }));
+
+    infL->addWidget(createIntSlider(
+        infContent, "OCR清晰度阈值:", 0, 500,
+        m_runtimeSettings.plateMinSharpness,
+        [this, persistRuntimeSettings](int v) {
+            m_runtimeSettings.plateMinSharpness = v;
+            persistRuntimeSettings();
+        }));
+
+    infL->addWidget(new QLabel("<b>检测框几何过滤</b>"));
+    QCheckBox *geometryFilterBox = new QCheckBox(
+        "启用车牌检测框几何过滤", infContent);
+    geometryFilterBox->setChecked(
+        m_runtimeSettings.plateGeometryFilterEnabled);
+    geometryFilterBox->setToolTip(
+        "在模型后处理完成后、跟踪和OCR之前过滤误检框。默认关闭；"
+        "阈值均按当前输入源中的旋转四点框计算。");
+    infL->addWidget(geometryFilterBox);
+
+    QWidget *geometryShortEdgeRow = createIntSlider(
+        infContent, "过滤最短边(px):", 1, 200,
+        m_runtimeSettings.plateGeometryMinShortEdge,
+        [this, persistRuntimeSettings](int v) {
+            m_runtimeSettings.plateGeometryMinShortEdge = v;
+            persistRuntimeSettings();
+        });
+    geometryShortEdgeRow->setToolTip(
+        "旋转框四条边中较短方向的平均像素长度；小于该值时过滤。");
+    infL->addWidget(geometryShortEdgeRow);
+
+    QWidget *geometryAreaRow = new QWidget(infContent);
+    QHBoxLayout *geometryAreaLayout = new QHBoxLayout(geometryAreaRow);
+    setupRow(geometryAreaLayout);
+    QLabel *geometryAreaLabel = new QLabel("过滤最小面积(px²):", geometryAreaRow);
+    geometryAreaLabel->setFixedWidth(130);
+    QSpinBox *geometryAreaBox = new QSpinBox(geometryAreaRow);
+    geometryAreaBox->setRange(1, 100000);
+    geometryAreaBox->setSingleStep(10);
+    geometryAreaBox->setValue(m_runtimeSettings.plateGeometryMinArea);
+    geometryAreaLayout->addWidget(geometryAreaLabel);
+    geometryAreaLayout->addWidget(geometryAreaBox, 1);
+    connect(geometryAreaBox, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, [this, persistRuntimeSettings](int v) {
+        m_runtimeSettings.plateGeometryMinArea = v;
+        persistRuntimeSettings();
+    });
+    geometryAreaRow->setToolTip(
+        "旋转四点框的实际四边形面积；小于该值时过滤。");
+    infL->addWidget(geometryAreaRow);
+
+    auto createAspectRow = [this, &setupRow](
+            QWidget *parent, const QString &label, double current) {
+        QWidget *row = new QWidget(parent);
+        QHBoxLayout *layout = new QHBoxLayout(row);
+        setupRow(layout);
+        QLabel *text = new QLabel(label, row);
+        text->setFixedWidth(130);
+        QDoubleSpinBox *box = new QDoubleSpinBox(row);
+        box->setDecimals(2);
+        box->setSingleStep(0.05);
+        box->setRange(1.0, 10.0);
+        box->setValue(current);
+        layout->addWidget(text);
+        layout->addWidget(box, 1);
+        return std::make_pair(row, box);
+    };
+    auto minAspectControl = createAspectRow(
+        infContent, "过滤最小长宽比:",
+        m_runtimeSettings.plateGeometryMinAspectX100 / 100.0);
+    auto maxAspectControl = createAspectRow(
+        infContent, "过滤最大长宽比:",
+        m_runtimeSettings.plateGeometryMaxAspectX100 / 100.0);
+    minAspectControl.second->setMaximum(maxAspectControl.second->value());
+    maxAspectControl.second->setMinimum(minAspectControl.second->value());
+    minAspectControl.first->setToolTip(
+        "按长边/短边计算，方向和倾斜角度不影响结果；低于该值时过滤。"
+        "双层车牌通常更接近1，请谨慎提高。");
+    maxAspectControl.first->setToolTip(
+        "按长边/短边计算；高于该值时过滤细长误检。");
+    connect(minAspectControl.second,
+            QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+            [this, persistRuntimeSettings,
+             maxAspectBox = maxAspectControl.second](double value) {
+        maxAspectBox->setMinimum(value);
+        m_runtimeSettings.plateGeometryMinAspectX100 =
+            static_cast<int>(std::lround(value * 100.0));
+        m_runtimeSettings.plateGeometryMaxAspectX100 =
+            static_cast<int>(std::lround(maxAspectBox->value() * 100.0));
+        persistRuntimeSettings();
+    });
+    connect(maxAspectControl.second,
+            QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+            [this, persistRuntimeSettings,
+             minAspectBox = minAspectControl.second](double value) {
+        minAspectBox->setMaximum(value);
+        m_runtimeSettings.plateGeometryMinAspectX100 =
+            static_cast<int>(std::lround(minAspectBox->value() * 100.0));
+        m_runtimeSettings.plateGeometryMaxAspectX100 =
+            static_cast<int>(std::lround(value * 100.0));
+        persistRuntimeSettings();
+    });
+    infL->addWidget(minAspectControl.first);
+    infL->addWidget(maxAspectControl.first);
+
+    const auto setGeometryControlsEnabled =
+        [geometryShortEdgeRow, geometryAreaRow, minAspectControl,
+         maxAspectControl](bool enabled) {
+            geometryShortEdgeRow->setEnabled(enabled);
+            geometryAreaRow->setEnabled(enabled);
+            minAspectControl.first->setEnabled(enabled);
+            maxAspectControl.first->setEnabled(enabled);
+        };
+    setGeometryControlsEnabled(m_runtimeSettings.plateGeometryFilterEnabled);
+    connect(geometryFilterBox, &QCheckBox::toggled, this,
+            [this, persistRuntimeSettings,
+             setGeometryControlsEnabled](bool enabled) {
+        m_runtimeSettings.plateGeometryFilterEnabled = enabled;
+        setGeometryControlsEnabled(enabled);
+        persistRuntimeSettings();
+        postStatus(enabled ? "车牌几何过滤已开启" : "车牌几何过滤已关闭", true);
+    });
+
+    infL->addWidget(new QLabel("<b>PCIe四路推理</b>"));
+    QWidget *pcieStrategyRow = new QWidget(infContent);
+    QHBoxLayout *pcieStrategyL = new QHBoxLayout(pcieStrategyRow);
+    setupRow(pcieStrategyL);
+    QLabel *pcieStrategyLab = new QLabel("四路检测策略:");
+    pcieStrategyLab->setFixedWidth(130);
+    QComboBox *pcieStrategyBox = new QComboBox();
+    pcieStrategyBox->addItems({"整图单次(速度)", "四路独立(小目标)"});
+    pcieStrategyBox->setCurrentIndex(m_runtimeSettings.pcieInferenceStrategy);
+    connect(pcieStrategyBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this, persistRuntimeSettings](int index) {
+        m_runtimeSettings.pcieInferenceStrategy = index;
+        persistRuntimeSettings();
+        postStatus("", true);
+    });
+    pcieStrategyL->addWidget(pcieStrategyLab);
+    pcieStrategyL->addWidget(pcieStrategyBox, 1);
+    infL->addWidget(pcieStrategyRow);
+
+    QCheckBox *detPipelineBox = new QCheckBox("四路独立前处理流水线");
+    detPipelineBox->setChecked(m_runtimeSettings.detPipelineEnabled);
+    connect(detPipelineBox, &QCheckBox::toggled, this,
+            [this, persistRuntimeSettings](bool checked) {
+        m_runtimeSettings.detPipelineEnabled = checked;
+        persistRuntimeSettings();
+        postStatus("", true);
+    });
+    infL->addWidget(detPipelineBox);
+
+    QWidget *preprocessRow = new QWidget(infContent);
+    QHBoxLayout *preprocessL = new QHBoxLayout(preprocessRow);
+    setupRow(preprocessL);
+    QLabel *preprocessLab = new QLabel("检测前处理:");
+    preprocessLab->setFixedWidth(130);
+    QComboBox *preprocessBox = new QComboBox();
+    preprocessBox->addItems({"自动(RGA优先)", "OpenCV", "RGA(失败回退)"});
+    preprocessBox->setCurrentIndex(m_runtimeSettings.detPreprocessBackend);
+    connect(preprocessBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this, persistRuntimeSettings](int index) {
+        m_runtimeSettings.detPreprocessBackend = index;
+        persistRuntimeSettings();
+        postStatus("", true);
+    });
+    preprocessL->addWidget(preprocessLab);
+    preprocessL->addWidget(preprocessBox, 1);
+    infL->addWidget(preprocessRow);
+
+    QCheckBox *quantizedOutputBox = new QCheckBox("旧V5量化输出直接解码");
+    quantizedOutputBox->setChecked(m_runtimeSettings.detQuantizedOutput);
+    quantizedOutputBox->setToolTip(
+        "仅配置ID 0使用；四个对比模型按各自契约请求float输出，模型主体仍在NPU执行");
+    connect(quantizedOutputBox, &QCheckBox::toggled, this,
+            [this, persistRuntimeSettings](bool checked) {
+        m_runtimeSettings.detQuantizedOutput = checked;
+        persistRuntimeSettings();
+        postStatus("", true);
+    });
+    infL->addWidget(quantizedOutputBox);
+
+    QWidget *algoRow = new QWidget(infContent);
+    QHBoxLayout *algoL = new QHBoxLayout(algoRow);
+    setupRow(algoL);
+    QLabel *algoLab = new QLabel("算法模式:");
+    algoLab->setFixedWidth(130);
+    QComboBox *algoBox = new QComboBox();
+    algoBox->addItems({"车牌识别", "环境检测(BDD+路标+信号灯)", "叠加显示(车牌+环境)"});
+    algoBox->setCurrentIndex(m_algoMode == CaptureThread::AlgoMode::EnvOnly ? 1 : m_algoMode == CaptureThread::AlgoMode::Overlay ? 2 : 0);
+    connect(algoBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, persistRuntimeSettings](int idx){
+        if (!m_captureThread) return;
+        if (idx == 1) m_algoMode = CaptureThread::AlgoMode::EnvOnly;
+        else if (idx == 2) m_algoMode = CaptureThread::AlgoMode::Overlay;
+        else m_algoMode = CaptureThread::AlgoMode::PlateOnly;
+        m_runtimeSettings.algoMode = idx;
+        persistRuntimeSettings();
+        m_captureThread->setAlgoMode(m_algoMode);
+        m_expectedDisplayConfigVersion =
+            m_captureThread->displayConfigVersion();
+        postStatus("", true);
+    });
+    algoL->addWidget(algoLab);
+    algoL->addWidget(algoBox, 1);
+    infL->addWidget(algoRow);
+
+    QWidget *dedupeRow = new QWidget(infContent);
+    QHBoxLayout *dedupeL = new QHBoxLayout(dedupeRow);
+    setupRow(dedupeL);
+    QLabel *dedupeLab = new QLabel("报表去重策略:");
+    dedupeLab->setFixedWidth(130);
+    QComboBox *dedupeBox = new QComboBox();
+    dedupeBox->addItems({"按输入源去重", "全局去重"});
+    dedupeBox->setCurrentIndex(m_runtimeSettings.dedupeBySource ? 0 : 1);
+    connect(dedupeBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, persistRuntimeSettings](int idx){
+        m_runtimeSettings.dedupeBySource = (idx == 0);
+        persistRuntimeSettings();
+    });
+    dedupeL->addWidget(dedupeLab);
+    dedupeL->addWidget(dedupeBox, 1);
+    infL->addWidget(dedupeRow);
+
+    infL->addWidget(new QLabel("<b>SD卡图片文件夹</b>"));
+    infL->addWidget(createIntSlider(infContent, "图片切换间隔(秒):", 1, 5,
+                                    m_runtimeSettings.sdImageIntervalSec,
+                                    [this, persistRuntimeSettings](int v){
+        m_runtimeSettings.sdImageIntervalSec = v;
+        persistRuntimeSettings();
+        if (m_captureThread) m_captureThread->setSdImageIntervalSeconds(v);
+        postStatus("", true);
+    }));
+
+    infL->addWidget(new QLabel("<b>抓拍速度</b>"));
+    int ocrPeriod = m_runtimeSettings.plateOcrPeriod;
+    infL->addWidget(createIntSlider(infContent, "OCR更新间隔(帧):", 1, 30, ocrPeriod, [this, persistRuntimeSettings](int v){
+        m_runtimeSettings.plateOcrPeriod = v;
+        persistRuntimeSettings();
+    }));
+
+    int plateStride = m_runtimeSettings.plateInferStride;
+    infL->addWidget(createIntSlider(infContent, "车牌检测抽帧(帧):", 1, 10, plateStride, [this, persistRuntimeSettings](int v){
+        m_runtimeSettings.plateInferStride = v;
+        persistRuntimeSettings();
+    }));
+
+    int envStride = m_runtimeSettings.envInferStride;
+    infL->addWidget(createIntSlider(infContent, "环境检测抽帧(帧):", 1, 30, envStride, [this, persistRuntimeSettings](int v){
+        m_runtimeSettings.envInferStride = v;
+        persistRuntimeSettings();
+    }));
+
+    int stableReq = m_runtimeSettings.plateStableRequired;
+    infL->addWidget(createIntSlider(infContent, "稳定次数(次):", 1, 5, stableReq, [this, persistRuntimeSettings](int v){
+        m_runtimeSettings.plateStableRequired = v;
+        persistRuntimeSettings();
+    }));
+
+    int boxHoldRuns = m_runtimeSettings.plateBoxHoldRuns;
+    infL->addWidget(createIntSlider(infContent, "标框漏检保留(次):", 0, 3, boxHoldRuns, [this, persistRuntimeSettings](int v){
+        m_runtimeSettings.plateBoxHoldRuns = v;
+        persistRuntimeSettings();
+    }));
+
+    int cooldownFrames = m_runtimeSettings.plateCooldownFrames;
+    infL->addWidget(createIntSlider(infContent, "同牌冷却(帧):", 0, 600, cooldownFrames, [this, persistRuntimeSettings](int v){
+        m_runtimeSettings.plateCooldownFrames = v;
+        persistRuntimeSettings();
+    }));
+
+    QWidget *uploadThumbRow = new QWidget(infContent);
+    QHBoxLayout *uploadThumbL = new QHBoxLayout(uploadThumbRow);
+    setupRow(uploadThumbL);
+    QLabel *uploadThumbLab = new QLabel("上报缩略图:");
+    uploadThumbLab->setFixedWidth(130);
+    QComboBox *uploadThumbBox = new QComboBox();
+    uploadThumbBox->addItems({"上报", "不上传"});
+    uploadThumbBox->setCurrentIndex(m_runtimeSettings.plateUploadThumb ? 0 : 1);
+    connect(uploadThumbBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, persistRuntimeSettings](int idx){
+        m_runtimeSettings.plateUploadThumb = (idx == 0);
+        persistRuntimeSettings();
+    });
+    uploadThumbL->addWidget(uploadThumbLab);
+    uploadThumbL->addWidget(uploadThumbBox, 1);
+    infL->addWidget(uploadThumbRow);
+
+    QWidget *detPerfRow = new QWidget(infContent);
+    QHBoxLayout *detPerfL = new QHBoxLayout(detPerfRow);
+    setupRow(detPerfL);
+    QLabel *detPerfLab = new QLabel("标框性能测试:");
+    detPerfLab->setFixedWidth(130);
+    QComboBox *detPerfBox = new QComboBox();
+    detPerfBox->addItems({"基线(量化直解)", "关闭文字", "关闭全部Overlay"});
+    {
+        int ovOn = m_runtimeSettings.drawOverlay != 0;
+        int txOn = m_runtimeSettings.drawText != 0;
+        int idx = 0;
+        if (ovOn && !txOn) idx = 1;
+        else if (!ovOn) idx = 2;
+        detPerfBox->setCurrentIndex(idx);
+    }
+    connect(detPerfBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, persistRuntimeSettings](int idx){
+        if (idx == 0) {
+            m_runtimeSettings.drawOverlay = 1;
+            m_runtimeSettings.drawText = 1;
+            m_runtimeSettings.drawSplit = 1;
+        } else if (idx == 1) {
+            m_runtimeSettings.drawOverlay = 1;
+            m_runtimeSettings.drawText = 0;
+            m_runtimeSettings.drawSplit = 1;
+        } else {
+            m_runtimeSettings.drawOverlay = 0;
+            m_runtimeSettings.drawText = 0;
+            m_runtimeSettings.drawSplit = 0;
+        }
+        persistRuntimeSettings();
+    });
+    detPerfL->addWidget(detPerfLab);
+    detPerfL->addWidget(detPerfBox, 1);
+    infL->addWidget(detPerfRow);
+
+    QCheckBox *envEnableBox = new QCheckBox("启用环境检测(BDD+路标+信号灯)");
+    envEnableBox->setChecked(m_runtimeSettings.envEnable);
+    connect(envEnableBox, &QCheckBox::toggled, this, [this, persistRuntimeSettings](bool on){
+        m_runtimeSettings.envEnable = on;
+        persistRuntimeSettings();
+    });
+    infL->addWidget(envEnableBox);
+
+    QCheckBox *detPartsBox = new QCheckBox("显示标框拆分耗时(pre/npu/post)");
+    detPartsBox->setChecked(m_runtimeSettings.showDetParts);
+    connect(detPartsBox, &QCheckBox::toggled, this, [this, persistRuntimeSettings](bool on){
+        m_runtimeSettings.showDetParts = on;
+        persistRuntimeSettings();
+    });
+    infL->addWidget(detPartsBox);
+
+    infL->addStretch();
+    QScrollArea *infScroll = new QScrollArea();
+    infScroll->setWidgetResizable(true);
+    infScroll->setFrameShape(QFrame::NoFrame);
+    infScroll->setWidget(infContent);
+    tabWidget->addTab(infScroll, "推理控制");
+
+    // ================== Tab 2: 颜色调节 (改为整数显示) ==================
+    QWidget *hsvTab = new QWidget();
+    QVBoxLayout *hsvL = new QVBoxLayout(hsvTab);
+
+    hsvL->addWidget(new QLabel("<b>仲裁权重与修正比例 (%)</b>"));
+    // 权重类参数涉及 float 存储，依然使用百分比显示
+    hsvL->addWidget(createPercentSlider(hsvTab, "模型颜色信任度阈值:", 100, 999, (int)(g_color_cfg.model_trust_val*1000), [this, persistRuntimeSettings](int v){
+        m_runtimeSettings.modelTrustVal = v / 1000.0f;
+        persistRuntimeSettings();
+    }));
+    hsvL->addWidget(createPercentSlider(hsvTab, "触发修正最小像素比:", 10, 500, (int)(g_color_cfg.min_color_ratio*1000), [this, persistRuntimeSettings](int v){
+        m_runtimeSettings.minColorRatio = v / 1000.0f;
+        persistRuntimeSettings();
+    }));
+
+    hsvL->addSpacing(10);
+    hsvL->addWidget(new QLabel("<b>HSV 物理边界 (整数)</b>"));
+    
+    // 使用 createIntSlider，并直接映射到 OpenCV 标准范围 (H:0-180, S/V:0-255)
+    hsvL->addWidget(createIntSlider(hsvTab, "黑色亮度 (V-Max):", 0, 255, g_color_cfg.black_v_max, [this, persistRuntimeSettings](int v){ m_runtimeSettings.blackVMax = v; persistRuntimeSettings(); }));
+    hsvL->addWidget(createIntSlider(hsvTab, "白色饱和度 (S-Max):", 0, 255, g_color_cfg.white_s_max, [this, persistRuntimeSettings](int v){ m_runtimeSettings.whiteSMax = v; persistRuntimeSettings(); }));
+    hsvL->addWidget(createIntSlider(hsvTab, "蓝色色调 (H-Min):", 0, 180, g_color_cfg.blue_h_min, [this, persistRuntimeSettings](int v){ m_runtimeSettings.blueHMin = v; persistRuntimeSettings(); }));
+    hsvL->addWidget(createIntSlider(hsvTab, "绿色色调 (H-Min):", 0, 180, g_color_cfg.green_h_min, [this, persistRuntimeSettings](int v){ m_runtimeSettings.greenHMin = v; persistRuntimeSettings(); }));
+    hsvL->addWidget(createIntSlider(hsvTab, "黄色色调 (H-Min):", 0, 180, g_color_cfg.yellow_h_min, [this, persistRuntimeSettings](int v){ m_runtimeSettings.yellowHMin = v; persistRuntimeSettings(); }));
+    hsvL->addWidget(createIntSlider(hsvTab, "黄色色调 (H-Max):", 0, 180, g_color_cfg.yellow_h_max, [this, persistRuntimeSettings](int v){ m_runtimeSettings.yellowHMax = v; persistRuntimeSettings(); }));
+    
+    hsvL->addStretch();
+    tabWidget->addTab(hsvTab, "颜色调节");
+
+    // ================== Tab 3: 双层车牌 ==================
+    QWidget *dpTab = new QWidget();
+    QVBoxLayout *dpL = new QVBoxLayout(dpTab);
+    dpL->addWidget(new QLabel("<b>垂直分割比例</b>"));
+    dpL->addWidget(createPercentSlider(dpTab, "上层字符高度:", 100, 850, g_color_cfg.double_upper_ratio, [this, persistRuntimeSettings](int v){ m_runtimeSettings.doubleUpperRatio = v; persistRuntimeSettings(); }));
+    dpL->addWidget(createPercentSlider(dpTab, "下层起始位置:", 50, 750, g_color_cfg.double_lower_start, [this, persistRuntimeSettings](int v){ m_runtimeSettings.doubleLowerStart = v; persistRuntimeSettings(); }));
+    dpL->addStretch();
+    tabWidget->addTab(dpTab, "双层车牌");
+
+    // ================== Tab 4: 后端地址 ==================
+    QWidget *backendTab = new QWidget();
+    QVBoxLayout *backendL = new QVBoxLayout(backendTab);
+    backendL->setContentsMargins(15, 15, 15, 15);
+    backendL->setSpacing(10);
+    QNetworkAccessManager *backendTestNam = new QNetworkAccessManager(&dialog);
+
+    backendL->addWidget(new QLabel("<b>云后端地址</b>"));
+
+    auto createTextRow = [&setupRow](QWidget *parent, const QString &label, QLabel **valueOut) {
+        QWidget *row = new QWidget(parent);
+        QHBoxLayout *h = new QHBoxLayout(row);
+        setupRow(h);
+        QLabel *lab = new QLabel(label, row);
+        lab->setFixedWidth(130);
+        QLabel *val = new QLabel(row);
+        val->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        h->addWidget(lab);
+        h->addWidget(val, 1);
+        if (valueOut) *valueOut = val;
+        return row;
+    };
+
+    QLabel *backendCurrentLabel = nullptr;
+    QLabel *backendSourceLabel = nullptr;
+    QLabel *backendConnLabel = nullptr;
+    QLabel *backendPathLabel = nullptr;
+    backendL->addWidget(createTextRow(backendTab, "当前地址:", &backendCurrentLabel));
+    backendL->addWidget(createTextRow(backendTab, "地址来源:", &backendSourceLabel));
+    backendL->addWidget(createTextRow(backendTab, "连接状态:", &backendConnLabel));
+    backendL->addWidget(createTextRow(backendTab, "保存文件:", &backendPathLabel));
+    backendPathLabel->setText(backendSettingsPath());
+
+    QWidget *backendInputRow = new QWidget(backendTab);
+    QHBoxLayout *backendInputL = new QHBoxLayout(backendInputRow);
+    setupRow(backendInputL);
+    QLabel *backendInputLab = new QLabel("后端地址:", backendInputRow);
+    backendInputLab->setFixedWidth(130);
+    QLineEdit *backendEdit = new QLineEdit(backendInputRow);
+    backendEdit->setPlaceholderText("http://101.201.76.16");
+    backendInputL->addWidget(backendInputLab);
+    backendInputL->addWidget(backendEdit, 1);
+    backendL->addWidget(backendInputRow);
+
+    QWidget *targetDeviceRow = new QWidget(backendTab);
+    QHBoxLayout *targetDeviceL = new QHBoxLayout(targetDeviceRow);
+    setupRow(targetDeviceL);
+    QLabel *targetDeviceLab = new QLabel("Target ESP32 ID:", targetDeviceRow);
+    targetDeviceLab->setFixedWidth(130);
+    QLineEdit *targetDeviceEdit = new QLineEdit(targetDeviceRow);
+    targetDeviceEdit->setPlaceholderText("esp32-servo-01");
+    targetDeviceEdit->setText(m_runtimeSettings.targetDeviceId.trimmed());
+    targetDeviceL->addWidget(targetDeviceLab);
+    targetDeviceL->addWidget(targetDeviceEdit, 1);
+    backendL->addWidget(targetDeviceRow);
+
+    QLabel *backendHint = new QLabel("保存基础地址，不要填写 /api/rk/report/status 这类接口路径。", backendTab);
+    backendHint->setWordWrap(true);
+    backendL->addWidget(backendHint);
+
+    QHBoxLayout *backendBtnRow = new QHBoxLayout();
+    QPushButton *btnBackendTest = new QPushButton("测试连接", backendTab);
+    QPushButton *btnBackendSave = new QPushButton("保存并应用", backendTab);
+    QPushButton *btnBackendReload = new QPushButton("重新读取", backendTab);
+    backendBtnRow->addWidget(btnBackendTest);
+    backendBtnRow->addWidget(btnBackendSave);
+    backendBtnRow->addWidget(btnBackendReload);
+    backendBtnRow->addStretch();
+    backendL->addLayout(backendBtnRow);
+
+    QLabel *backendStatus = new QLabel(backendTab);
+    backendStatus->setWordWrap(true);
+    backendL->addWidget(backendStatus);
+
+    backendL->addSpacing(12);
+    backendL->addWidget(new QLabel("<b>TTS audio output</b>", backendTab));
+
+    QWidget *audioRow = new QWidget(backendTab);
+    QHBoxLayout *audioL = new QHBoxLayout(audioRow);
+    setupRow(audioL);
+    QLabel *audioLab = new QLabel("Audio device:", audioRow);
+    audioLab->setFixedWidth(130);
+    QComboBox *audioBox = new QComboBox(audioRow);
+    QPushButton *btnAudioRefresh = new QPushButton("Refresh", audioRow);
+    QPushButton *btnAudioTest = new QPushButton("Test", audioRow);
+    audioL->addWidget(audioLab);
+    audioL->addWidget(audioBox, 1);
+    audioL->addWidget(btnAudioRefresh);
+    audioL->addWidget(btnAudioTest);
+    backendL->addWidget(audioRow);
+
+    QLabel *audioStatus = new QLabel(backendTab);
+    audioStatus->setWordWrap(true);
+    backendL->addWidget(audioStatus);
+
+    auto selectedAudioDevice = [audioBox]() {
+        const QString dev = audioBox->currentData().toString().trimmed();
+        return dev.isEmpty() ? QStringLiteral("default") : dev;
+    };
+
+    auto refreshAudioDevices = [this, audioBox, audioStatus]() {
+        const QString current = m_runtimeSettings.audioOutputDevice.trimmed().isEmpty()
+                                ? QStringLiteral("default")
+                                : m_runtimeSettings.audioOutputDevice.trimmed();
+        audioBox->blockSignals(true);
+        audioBox->clear();
+        audioBox->addItem("default - system default", "default");
+
+        QProcess proc;
+        proc.start("aplay", QStringList{"-l"});
+        if (proc.waitForFinished(800)) {
+            const QString out = QString::fromLocal8Bit(proc.readAllStandardOutput());
+            const QRegularExpression re(R"(card\s+(\d+):\s*([^\[]+)\[[^\]]+\],\s*device\s+(\d+):\s*([^\[]+)\[([^\]]+)\])");
+            QRegularExpressionMatchIterator it = re.globalMatch(out);
+            while (it.hasNext()) {
+                const QRegularExpressionMatch m = it.next();
+                const QString card = m.captured(1).trimmed();
+                const QString cardName = m.captured(2).trimmed();
+                const QString devNo = m.captured(3).trimmed();
+                const QString devName = m.captured(4).trimmed();
+                const QString dev = QString("plughw:%1,%2").arg(card, devNo);
+                const QString label = QString("%1 - %2 / %3").arg(dev, cardName, devName);
+                audioBox->addItem(label, dev);
+            }
+        }
+
+        int idx = audioBox->findData(current);
+        if (idx < 0 && current != "default") {
+            audioBox->addItem(QString("%1 - saved device").arg(current), current);
+            idx = audioBox->findData(current);
+        }
+        audioBox->setCurrentIndex(idx >= 0 ? idx : 0);
+        audioBox->blockSignals(false);
+        audioStatus->setText(QString("Current: %1").arg(current));
+    };
+
+    connect(audioBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [this, selectedAudioDevice, audioStatus, persistRuntimeSettings](int) {
+        m_runtimeSettings.audioOutputDevice = selectedAudioDevice();
+        persistRuntimeSettings();
+        audioStatus->setText(QString("Saved: %1").arg(m_runtimeSettings.audioOutputDevice));
+        postStatus("", true);
+    });
+
+    connect(btnAudioRefresh, &QPushButton::clicked, this, [refreshAudioDevices]() {
+        refreshAudioDevices();
+    });
+
+    connect(btnAudioTest, &QPushButton::clicked, this,
+            [this, selectedAudioDevice, audioStatus, persistRuntimeSettings]() {
+        m_runtimeSettings.audioOutputDevice = selectedAudioDevice();
+        persistRuntimeSettings();
+        QString wav;
+        if (m_ttsPlayer && m_ttsPlayer->isReady()) {
+            wav = QDir(m_ttsPlayer->baseDir()).filePath("fixed/welcome.wav");
+        }
+        if (wav.isEmpty() || !QFileInfo::exists(wav)) {
+            wav = "/home/linaro/Desktop/rk3568/tts_wav_templates/output/fixed/welcome.wav";
+        }
+        if (!QFileInfo::exists(wav)) {
+            audioStatus->setText("Test failed: welcome.wav not found");
+            return;
+        }
+        QStringList args;
+        if (m_runtimeSettings.audioOutputDevice != "default") {
+            args << "-D" << m_runtimeSettings.audioOutputDevice;
+        }
+        args << wav;
+        const bool ok = QProcess::startDetached("aplay", args);
+        audioStatus->setText(ok ? QString("Testing: %1").arg(m_runtimeSettings.audioOutputDevice)
+                                : QString("Test failed: aplay start error"));
+    });
+
+    auto updateBackendUi = [=]() {
+        QString baseText;
+        QString sourceText = "empty";
+        QString connText = "未连接";
+        if (m_backendClient) {
+            const QJsonObject st = m_backendClient->statusJson();
+            baseText = st.value("backend_base").toString();
+            sourceText = st.value("backend_source").toString("empty");
+            connText = st.value("backend_ok").toBool(false) ? "正常" : "未连接";
+            if (st.contains("backend_latency_ms")) connText += QString("  延迟 %1ms").arg(st.value("backend_latency_ms").toInt());
+            const QString err = st.value("backend_error").toString();
+            if (!err.isEmpty() && connText == "未连接") connText += QString("  错误: %1").arg(err);
+        }
+        const BackendSettingsData savedBackend = loadBackendSettings();
+        if (baseText.isEmpty()) baseText = savedBackend.backendBase;
+        if (sourceText == "empty" && !savedBackend.backendSource.isEmpty()) sourceText = savedBackend.backendSource;
+        backendCurrentLabel->setText(baseText.isEmpty() ? "-" : baseText);
+        backendSourceLabel->setText(sourceText.isEmpty() ? "empty" : sourceText);
+        backendConnLabel->setText(connText);
+        if (backendEdit->text().trimmed().isEmpty() && !baseText.isEmpty()) backendEdit->setText(baseText);
+        if (targetDeviceEdit->text().trimmed().isEmpty()) targetDeviceEdit->setText(m_runtimeSettings.targetDeviceId.trimmed());
+    };
+
+    auto makePingUrl = [](QUrl base) {
+        QString path = base.path();
+        if (!path.endsWith("/")) path += "/";
+        path += "api/ping";
+        base.setPath(path);
+        base.setQuery(QString("ts=%1").arg(QDateTime::currentMSecsSinceEpoch()));
+        return base;
+    };
+
+    connect(btnBackendTest, &QPushButton::clicked, this, [=]() {
+        QString err;
+        QUrl base = normalizeBackendBase(backendEdit->text(), &err);
+        if (!base.isValid()) {
+            backendStatus->setText(QString("地址错误：%1").arg(err));
+            return;
+        }
+        btnBackendTest->setEnabled(false);
+        backendStatus->setText("正在测试连接...");
+        const qint64 startedMs = QDateTime::currentMSecsSinceEpoch();
+        QNetworkRequest req(makePingUrl(base));
+        req.setHeader(QNetworkRequest::UserAgentHeader, "rk3568-gui");
+        QNetworkReply *rep = backendTestNam->get(req);
+        QTimer::singleShot(5000, rep, [rep]() { rep->abort(); });
+        connect(rep, &QNetworkReply::finished, this, [=]() {
+            const int httpCode = rep->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            const QByteArray data = rep->isOpen() ? rep->readAll() : QByteArray();
+            const QString netErr = rep->error() == QNetworkReply::NoError ? QString() : rep->errorString();
+            rep->deleteLater();
+            btnBackendTest->setEnabled(true);
+            const int latency = (int)qMax<qint64>(0, QDateTime::currentMSecsSinceEpoch() - startedMs);
+            QJsonParseError pe;
+            const QJsonDocument jd = QJsonDocument::fromJson(data, &pe);
+            const bool okJson = pe.error == QJsonParseError::NoError && jd.isObject() && jd.object().value("ok").toBool(false);
+            if (netErr.isEmpty() && httpCode >= 200 && httpCode < 300 && okJson) {
+                backendStatus->setText(QString("连接正常，延迟 %1ms").arg(latency));
+            } else {
+                backendStatus->setText(QString("连接失败：%1 HTTP=%2 延迟=%3ms").arg(netErr.isEmpty() ? "bad_response" : netErr).arg(httpCode).arg(latency));
+            }
+        });
+    });
+
+    connect(btnBackendSave, &QPushButton::clicked, this, [=]() {
+        QString err;
+        QUrl base = normalizeBackendBase(backendEdit->text(), &err);
+        if (!base.isValid()) {
+            backendStatus->setText(QString("地址错误：%1").arg(err));
+            return;
+        }
+        BackendSettingsData bs;
+        bs.backendBase = backendBaseToString(base);
+        bs.backendSource = "settings";
+        QString saveError;
+        if (!saveBackendSettings(bs, &saveError)) {
+            backendStatus->setText(QString("保存失败：%1").arg(saveError));
+            return;
+        }
+        if (m_backendClient) {
+            m_backendClient->setBaseUrl(base, "settings");
+            m_backendClient->start();
+        }
+        const QString targetDeviceId = targetDeviceEdit->text().trimmed();
+        if (!targetDeviceId.isEmpty()) {
+            m_runtimeSettings.targetDeviceId = targetDeviceId;
+            persistRuntimeSettings();
+        }
+        backendStatus->setText("已保存并应用，后续上报将使用新地址。");
+        updateBackendUi();
+        postStatus("", true);
+    });
+
+    connect(btnBackendReload, &QPushButton::clicked, this, [=]() {
+        const BackendSettingsData bs = loadBackendSettings();
+        if (!bs.backendBase.isEmpty()) {
+            backendEdit->setText(bs.backendBase);
+        } else {
+            const BackendSettingsData effective = loadEffectiveBackendSettings();
+            if (!effective.backendBase.isEmpty()) backendEdit->setText(effective.backendBase);
+        }
+        m_runtimeSettings = loadRuntimeSettings();
+        targetDeviceEdit->setText(m_runtimeSettings.targetDeviceId.trimmed());
+        updateBackendUi();
+        backendStatus->setText("已重新读取本地后端配置。");
+    });
+
+    QTimer *backendUiTimer = new QTimer(&dialog);
+    connect(backendUiTimer, &QTimer::timeout, this, [=]() { updateBackendUi(); });
+    backendUiTimer->start(1000);
+
+    updateBackendUi();
+    refreshAudioDevices();
+    backendL->addStretch();
+    tabWidget->addTab(backendTab, "后端地址");
+
+    // ================== Tab 5: 模型测评 ==================
+    QWidget *evaluationTab = new QWidget();
+    QVBoxLayout *evaluationL = new QVBoxLayout(evaluationTab);
+    evaluationL->setContentsMargins(15, 15, 15, 15);
+    evaluationL->setSpacing(12);
+    evaluationL->addWidget(new QLabel("<b>车牌检测与 OCR 文件夹测评</b>"));
+
+    QWidget *evaluationFolderRow = new QWidget(evaluationTab);
+    QHBoxLayout *evaluationFolderL = new QHBoxLayout(evaluationFolderRow);
+    setupRow(evaluationFolderL);
+    QLabel *evaluationFolderLabel = new QLabel("图片文件夹:", evaluationFolderRow);
+    evaluationFolderLabel->setFixedWidth(90);
+    QLineEdit *evaluationFolderEdit = new QLineEdit(evaluationFolderRow);
+    evaluationFolderEdit->setReadOnly(true);
+    QPushButton *evaluationFolderBtn = new QPushButton("选择文件夹", evaluationFolderRow);
+    evaluationFolderL->addWidget(evaluationFolderLabel);
+    evaluationFolderL->addWidget(evaluationFolderEdit, 1);
+    evaluationFolderL->addWidget(evaluationFolderBtn);
+    evaluationL->addWidget(evaluationFolderRow);
+
+    QWidget *evaluationCsvRow = new QWidget(evaluationTab);
+    QHBoxLayout *evaluationCsvL = new QHBoxLayout(evaluationCsvRow);
+    setupRow(evaluationCsvL);
+    QLabel *evaluationCsvLabel = new QLabel("输出报表:", evaluationCsvRow);
+    evaluationCsvLabel->setFixedWidth(90);
+    QLineEdit *evaluationCsvEdit = new QLineEdit(evaluationCsvRow);
+    evaluationCsvEdit->setReadOnly(true);
+    QPushButton *evaluationCsvBtn = new QPushButton("选择CSV", evaluationCsvRow);
+    evaluationCsvL->addWidget(evaluationCsvLabel);
+    evaluationCsvL->addWidget(evaluationCsvEdit, 1);
+    evaluationCsvL->addWidget(evaluationCsvBtn);
+    evaluationL->addWidget(evaluationCsvRow);
+
+    QProgressBar *evaluationProgress = new QProgressBar(evaluationTab);
+    evaluationProgress->setRange(0, 1);
+    evaluationProgress->setValue(0);
+    evaluationProgress->setTextVisible(true);
+    evaluationL->addWidget(evaluationProgress);
+
+    QLabel *evaluationStatus = new QLabel("就绪", evaluationTab);
+    evaluationStatus->setWordWrap(true);
+    evaluationStatus->setStyleSheet("color: #666666;");
+    evaluationL->addWidget(evaluationStatus);
+
+    QHBoxLayout *evaluationActions = new QHBoxLayout();
+    QPushButton *evaluationStartBtn = new QPushButton("开始测评", evaluationTab);
+    QPushButton *evaluationCancelBtn = new QPushButton("取消", evaluationTab);
+    evaluationCancelBtn->setEnabled(false);
+    evaluationActions->addWidget(evaluationStartBtn);
+    evaluationActions->addWidget(evaluationCancelBtn);
+    evaluationActions->addStretch();
+    evaluationL->addLayout(evaluationActions);
+    evaluationL->addStretch();
+
+    bool evaluationRunning = false;
+    bool evaluationCancelRequested = false;
+    connect(evaluationFolderBtn, &QPushButton::clicked, this, [=]() {
+        const QString folder = QFileDialog::getExistingDirectory(
+            this, "选择测评图片文件夹", QDir::homePath());
+        if (folder.isEmpty()) return;
+        evaluationFolderEdit->setText(folder);
+        evaluationFolderEdit->setToolTip(folder);
+        const QString defaultName = QString("plate_evaluation_%1.csv")
+            .arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss"));
+        const QString output = QDir(folder).filePath(defaultName);
+        evaluationCsvEdit->setText(output);
+        evaluationCsvEdit->setToolTip(output);
+    });
+    connect(evaluationCsvBtn, &QPushButton::clicked, this, [=]() {
+        QString initial = evaluationCsvEdit->text().trimmed();
+        if (initial.isEmpty()) {
+            initial = QString("plate_evaluation_%1.csv")
+                .arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss"));
+        }
+        QString path = QFileDialog::getSaveFileName(
+            this, "选择测评 CSV", initial, "CSV (*.csv)");
+        if (path.isEmpty()) return;
+        if (!path.endsWith(".csv", Qt::CaseInsensitive)) path += ".csv";
+        evaluationCsvEdit->setText(path);
+        evaluationCsvEdit->setToolTip(path);
+    });
+    connect(evaluationCancelBtn, &QPushButton::clicked, this, [&evaluationCancelRequested]() {
+        evaluationCancelRequested = true;
+    });
+    connect(&dialog, &QDialog::rejected, this, [&evaluationRunning, &evaluationCancelRequested]() {
+        if (evaluationRunning) evaluationCancelRequested = true;
+    });
+    connect(&dialog, &QDialog::accepted, this, [&evaluationRunning, &evaluationCancelRequested]() {
+        if (evaluationRunning) evaluationCancelRequested = true;
+    });
+    connect(evaluationStartBtn, &QPushButton::clicked, this,
+            [&, evaluationFolderEdit, evaluationCsvEdit, evaluationFolderBtn, evaluationCsvBtn,
+             evaluationStartBtn, evaluationCancelBtn, evaluationProgress, evaluationStatus]() {
+        if (evaluationRunning) return;
+        if (m_isCapturing) {
+            QMessageBox::information(&dialog, "提示", "请先停止实时采集，再运行模型测评。");
+            return;
+        }
+        const QString folder = evaluationFolderEdit->text().trimmed();
+        const QString csvPath = evaluationCsvEdit->text().trimmed();
+        if (folder.isEmpty()) {
+            QMessageBox::information(&dialog, "提示", "请先选择测评图片文件夹。");
+            return;
+        }
+        if (csvPath.isEmpty()) {
+            QMessageBox::information(&dialog, "提示", "请先选择 CSV 输出路径。");
+            return;
+        }
+
+        evaluationRunning = true;
+        evaluationCancelRequested = false;
+        evaluationFolderBtn->setEnabled(false);
+        evaluationCsvBtn->setEnabled(false);
+        evaluationStartBtn->setEnabled(false);
+        evaluationCancelBtn->setEnabled(true);
+        evaluationProgress->setRange(0, 0);
+        evaluationStatus->setText("正在初始化车牌检测与 OCR 模型...");
+        QApplication::processEvents();
+
+        PlateEvaluationSummary summary;
+        QString evaluationError;
+        const bool ok = exportPlateEvaluationCsv(
+            folder, csvPath,
+            [&](int completed, int total, const QString &relativePath) {
+                evaluationProgress->setRange(0, qMax(1, total));
+                evaluationProgress->setValue(completed);
+                if (relativePath.isEmpty()) {
+                    evaluationStatus->setText("正在初始化车牌检测与 OCR 模型...");
+                } else {
+                    evaluationStatus->setText(
+                        QString("%1 / %2  %3").arg(completed).arg(total, 0, 10).arg(relativePath));
+                }
+                QApplication::processEvents();
+                return !evaluationCancelRequested;
+            },
+            summary, evaluationError);
+
+        evaluationRunning = false;
+        evaluationFolderBtn->setEnabled(true);
+        evaluationCsvBtn->setEnabled(true);
+        evaluationStartBtn->setEnabled(true);
+        evaluationCancelBtn->setEnabled(false);
+
+        if (ok) {
+            evaluationProgress->setRange(0, qMax(1, summary.totalImages));
+            evaluationProgress->setValue(summary.totalImages);
+            evaluationStatus->setText(
+                QString("完成：图片 %1，检出图 %2，未检出 %3，失败 %4，车牌记录 %5，OCR通过 %6，耗时 %7ms")
+                    .arg(summary.totalImages)
+                    .arg(summary.detectedImages)
+                    .arg(summary.noDetectionImages)
+                    .arg(summary.failedImages)
+                    .arg(summary.detectionRows)
+                    .arg(summary.acceptedOcrRows)
+                    .arg(summary.elapsedMs));
+            QMessageBox::information(&dialog, "测评完成",
+                                     QString("CSV 已导出：\n%1").arg(summary.csvPath));
+        } else if (summary.canceled || evaluationError == "canceled") {
+            evaluationStatus->setText("测评已取消，未生成 CSV。");
+            evaluationProgress->setValue(0);
+        } else {
+            evaluationStatus->setText(QString("测评失败：%1").arg(evaluationError));
+            QMessageBox::warning(&dialog, "测评失败", evaluationError);
+        }
+    });
+
+    tabWidget->addTab(evaluationTab, "模型测评");
+
+    // ================== Tab 6: 参数配置 (JSON 管理) ==================
+    QWidget *cfgTab = new QWidget();
+    QVBoxLayout *cfgL = new QVBoxLayout(cfgTab);
+    cfgL->setContentsMargins(15, 15, 15, 15);
+    cfgL->setSpacing(12);
+
+    cfgL->addWidget(new QLabel("<b>本地存档管理</b>"));
+    
+    // 两个按钮：导出参数，导入参数 (刚好四个字)
+    QPushButton *btnExport = new QPushButton("导出参数");
+    QPushButton *btnImport = new QPushButton("导入参数");
+    
+    // 布局按钮：不让它们拉伸到全宽
+    QHBoxLayout *btnRow = new QHBoxLayout();
+    btnRow->addWidget(btnExport);
+    btnRow->addWidget(btnImport);
+    btnRow->addStretch(); // 靠左对齐
+
+    cfgL->addLayout(btnRow);
+    cfgL->addWidget(new QLabel(QString("<font color='gray'>* 当前设置会自动保存到 %1，重启自动导入</font>")
+                               .arg(runtimeSettingsPath().toHtmlEscaped())));
+    
+    QHBoxLayout *rptRow = new QHBoxLayout();
+    QPushButton *btnReportExport = new QPushButton("导出报表");
+    QPushButton *btnReportClear = new QPushButton("清空报表");
+    rptRow->addWidget(btnReportExport);
+    rptRow->addWidget(btnReportClear);
+    rptRow->addStretch();
+    cfgL->addLayout(rptRow);
+    cfgL->addWidget(new QLabel("<font color='gray'>* 报表记录：稳定识别到的车牌 + 时间 + 颜色</font>"));
+    cfgL->addStretch();
+
+    // --- 逻辑：导出 ---
+    connect(btnExport, &QPushButton::clicked, [this, &dialog]() {
+        QString time = QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss");
+        QString path = QFileDialog::getSaveFileName(this, "导出配置", QString("setting_%1.json").arg(time), "JSON (*.json)");
+        if (path.isEmpty()) return;
+
+        QJsonObject json = runtimeSettingsToJson(m_runtimeSettings);
+
+        QFile f(path);
+        if (f.open(QFile::WriteOnly)) {
+            f.write(QJsonDocument(json).toJson());
+            QMessageBox::information(&dialog, "成功", "配置已保存。");
+        }
+    });
+
+    // --- 逻辑：导入 ---
+    connect(btnImport, &QPushButton::clicked, [this, &dialog]() {
+        QString path = QFileDialog::getOpenFileName(this, "导入配置", "", "JSON (*.json)");
+        if (path.isEmpty()) return;
+
+        QFile f(path);
+        if (f.open(QFile::ReadOnly)) {
+            QJsonObject json = QJsonDocument::fromJson(f.readAll()).object();
+            if (applyRuntimeSettingsJson(m_runtimeSettings, json)) {
+                saveRuntimeSettings(m_runtimeSettings);
+                applyRuntimeSettingsToProcess(m_runtimeSettings);
+                m_currentConf = m_runtimeSettings.plateConf;
+                if (m_runtimeSettings.algoMode == 1) m_algoMode = CaptureThread::AlgoMode::EnvOnly;
+                else if (m_runtimeSettings.algoMode == 2) m_algoMode = CaptureThread::AlgoMode::Overlay;
+                else m_algoMode = CaptureThread::AlgoMode::PlateOnly;
+                if (m_captureThread) {
+                    m_captureThread->setAlgoMode(m_algoMode);
+                    m_captureThread->setSdImageIntervalSeconds(m_runtimeSettings.sdImageIntervalSec);
+                    m_captureThread->setGlobalInferenceEnabled(
+                        m_runtimeSettings.globalInferenceEnabled);
+                    m_expectedDisplayConfigVersion =
+                        m_captureThread->displayConfigVersion();
+                }
+                QMessageBox::information(&dialog, "成功", "参数已导入，界面将自动重载。");
+                dialog.accept(); // 强制关闭以更新滑块位置
+            }
+        }
+    });
+
+    connect(btnReportExport, &QPushButton::clicked, [this, &dialog]() {
+        if (m_reportRows.isEmpty()) {
+            QMessageBox::information(&dialog, "提示", "当前没有报表数据。");
+            return;
+        }
+        QString time = QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss");
+        QString path = QFileDialog::getSaveFileName(this, "导出报表", QString("report_%1.csv").arg(time), "CSV (*.csv)");
+        if (path.isEmpty()) return;
+        QFile f(path);
+        if (!f.open(QFile::WriteOnly | QFile::Truncate)) return;
+        QTextStream out(&f);
+        out.setCodec("UTF-8");
+        out << QChar(0xfeff);
+        out << "time_bj,source,plate,color,vehicle_type,plate_category_code,plate_category,det_conf_pct,rec_conf_pct,plate_normalized,plate_category_rule,plate_category_rule_version\n";
+        for (const auto& row : m_reportRows) {
+            if (row.size() < 12) continue;
+            out << row[0] << "," << row[1] << "," << row[2] << "," << row[3]
+                << "," << row[4] << "," << row[5] << "," << row[6]
+                << "," << row[7] << "," << row[8] << "," << row[9]
+                << "," << row[10] << "," << row[11] << "\n";
+        }
+        QMessageBox::information(&dialog, "成功", "报表已导出。");
+    });
+
+    connect(btnReportClear, &QPushButton::clicked, [this, &dialog]() {
+        m_reportRows.clear();
+        QMessageBox::information(&dialog, "成功", "报表已清空。");
+    });
+
+    tabWidget->addTab(cfgTab, "参数配置");
+
+    // ================== 底部区域 ==================
+    mainLayout->addWidget(tabWidget, 1);
+    
+    QHBoxLayout *bottomL = new QHBoxLayout();
+    QComboBox *tBox = new QComboBox();
+    tBox->addItems({"科技暗色", "简约亮色", "海洋蓝"});
+    tBox->setCurrentIndex((int)m_currentTheme);
+    
+    QPushButton *btnOk = new QPushButton("应用更改");
+    btnOk->setStyleSheet("QPushButton { background-color: #222; color: white; font-weight: bold; }");
+    
+    bottomL->addWidget(new QLabel("风格:"));
+    bottomL->addWidget(tBox);
+    bottomL->addStretch();
+    bottomL->addWidget(btnOk);
+    mainLayout->addLayout(bottomL);
+
+    connect(btnOk, &QPushButton::clicked, &dialog, &QDialog::accept);
+    if (dialog.exec() == QDialog::Accepted) {
+        m_currentTheme = (AppTheme)tBox->currentIndex();
+        m_runtimeSettings.theme = tBox->currentIndex();
+        saveRuntimeSettings(m_runtimeSettings);
+        applyTheme(m_currentTheme);
+    }
+}
+
+void MainWindow::handleViewModeChanged(int index) {
+    if (!m_captureThread) return;
+    QString view = "mosaic_raw";
+    if (index == 0) {
+        m_captureThread->setDisplayMode(CaptureThread::DisplayMode::FpgaMosaic);
+        m_mosaicCfgBtn->setEnabled(false);
+        view = (m_inputMode == CaptureThread::InputMode::SdCard) ? "sd_mosaic_raw" : "mosaic_raw";
+    } else if (index >= 1 && index <= 4) {
+        m_captureThread->setDisplayMode(CaptureThread::DisplayMode::SingleSource);
+        m_captureThread->setSingleSource(index);
+        m_mosaicCfgBtn->setEnabled(false);
+        view = QString("src%1").arg(index);
+    } else if (index == 5) {
+        m_captureThread->setDisplayMode(CaptureThread::DisplayMode::CustomMosaic);
+        m_captureThread->setMosaicMapping(m_mosaicMapping);
+        m_mosaicCfgBtn->setEnabled(true);
+        view = (m_inputMode == CaptureThread::InputMode::SdCard) ? "sd_mosaic_custom" : "mosaic_custom";
+    }
+    m_expectedDisplayConfigVersion = m_captureThread->displayConfigVersion();
+    if (m_videoLabel) {
+        m_videoLabel->setStatusText("正在切换画面...");
+    }
+    postStatus(view, true);
+}
+
+void MainWindow::openMosaicConfig() {
+    QDialog dialog(this);
+    dialog.setWindowTitle("拼接设置");
+    dialog.setFixedWidth(420);
+
+    auto createSourceBox = [&dialog](int current) {
+        QComboBox *box = new QComboBox(&dialog);
+        box->addItems({"无", "源1", "源2", "源3", "源4"});
+        int idx = current;
+        if (idx < 0) idx = 0;
+        if (idx > 4) idx = 4;
+        box->setCurrentIndex(idx);
+        box->setFixedWidth(120);
+        return box;
+    };
+
+    QVBoxLayout *mainLayout = new QVBoxLayout(&dialog);
+
+    QGridLayout *grid = new QGridLayout();
+    QLabel *tl = new QLabel("左上", &dialog);
+    QLabel *tr = new QLabel("右上", &dialog);
+    QLabel *bl = new QLabel("左下", &dialog);
+    QLabel *br = new QLabel("右下", &dialog);
+
+    QComboBox *boxTL = createSourceBox(m_mosaicMapping[0]);
+    QComboBox *boxTR = createSourceBox(m_mosaicMapping[1]);
+    QComboBox *boxBL = createSourceBox(m_mosaicMapping[2]);
+    QComboBox *boxBR = createSourceBox(m_mosaicMapping[3]);
+
+    grid->addWidget(tl, 0, 0);
+    grid->addWidget(boxTL, 0, 1);
+    grid->addWidget(tr, 0, 2);
+    grid->addWidget(boxTR, 0, 3);
+    grid->addWidget(bl, 1, 0);
+    grid->addWidget(boxBL, 1, 1);
+    grid->addWidget(br, 1, 2);
+    grid->addWidget(boxBR, 1, 3);
+
+    mainLayout->addLayout(grid);
+
+    QHBoxLayout *bottom = new QHBoxLayout();
+    bottom->addStretch();
+    QPushButton *btnOk = new QPushButton("应用", &dialog);
+    QPushButton *btnCancel = new QPushButton("取消", &dialog);
+    bottom->addWidget(btnOk);
+    bottom->addWidget(btnCancel);
+    mainLayout->addLayout(bottom);
+
+    connect(btnOk, &QPushButton::clicked, &dialog, &QDialog::accept);
+    connect(btnCancel, &QPushButton::clicked, &dialog, &QDialog::reject);
+
+    if (dialog.exec() == QDialog::Accepted) {
+        m_mosaicMapping = {boxTL->currentIndex(), boxTR->currentIndex(), boxBL->currentIndex(), boxBR->currentIndex()};
+        if (m_captureThread) {
+            m_captureThread->setMosaicMapping(m_mosaicMapping);
+            m_expectedDisplayConfigVersion = m_captureThread->displayConfigVersion();
+        }
+        if (m_videoLabel) {
+            m_videoLabel->setStatusText("正在切换画面...");
+        }
+    }
+}
+
+// --- 主题应用 ---
+void MainWindow::applyTheme(AppTheme theme) {
+    QString qss;
+    if (theme == AppTheme::Dark) {
+        qss =
+            "QMainWindow { background-color: #1a1a1a; }"
+            "QWidget#rightPanel { background-color: #1a1a1a; }"
+            "QScrollArea { background: transparent; }"
+            "QScrollArea QWidget { background: transparent; }"
+            "QWidget[plateItem=\"true\"] { background-color: rgba(255,255,255,10); border: 1px solid rgba(255,255,255,20); border-radius: 6px; }"
+            "QFrame[plateSep=\"true\"] { background-color: rgba(0,0,0,220); max-height: 1px; }"
+            "QLabel { color: #00ffcc; }";
+    } else if (theme == AppTheme::OceanBlue) {
+        qss =
+            "QMainWindow { background-color: #00324a; }"
+            "QWidget#rightPanel { background-color: #00324a; }"
+            "QScrollArea { background: transparent; }"
+            "QScrollArea QWidget { background: transparent; }"
+            "QWidget[plateItem=\"true\"] { background-color: rgba(255,255,255,10); border: 1px solid rgba(255,255,255,20); border-radius: 6px; }"
+            "QFrame[plateSep=\"true\"] { background-color: rgba(0,0,0,220); max-height: 1px; }"
+            "QLabel { color: #9cdcfe; }";
+    } else {
+        qss =
+            "QMainWindow { background-color: #f5f5f5; }"
+            "QWidget#rightPanel { background-color: #f5f5f5; }"
+            "QScrollArea { background: transparent; }"
+            "QScrollArea QWidget { background: transparent; }"
+            "QWidget[plateItem=\"true\"] { background-color: rgba(0,0,0,6); border: 1px solid rgba(0,0,0,16); border-radius: 6px; }"
+            "QFrame[plateSep=\"true\"] { background-color: rgba(0,0,0,120); max-height: 1px; }"
+            "QLabel { color: #333; }";
+    }
+    this->setStyleSheet(qss);
+}

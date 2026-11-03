@@ -1,0 +1,36 @@
+logLevel: info
+
+rtsp: no
+rtmp: no
+hls: no
+srt: yes
+srtAddress: :8890
+
+webrtc: yes
+webrtcAddress: 127.0.0.1:8889
+webrtcLocalUDPAddress: :8189
+webrtcIPsFromInterfaces: no
+webrtcAdditionalHosts: [47.113.231.233, adas.wmnnj.top]
+webrtcAllowOrigins: ['https://47.113.231.233', 'https://adas.wmnnj.top', 'http://127.0.0.1:8082']
+moq: no
+
+authMethod: internal
+authInternalUsers:
+  - user: rk3568
+    pass: CHANGE_ME_PASS
+    ips: []
+    permissions:
+      - action: publish
+        path:
+  - user: viewer
+    pass: CHANGE_ME_PASS
+    ips: []
+    permissions:
+      - action: read
+        path:
+
+paths:
+  all_others:
+    source: publisher
+    overridePublisher: no
+    srtPublishPassphrase: CHANGE_ME_SRTPUBLISHPASSPHRASE

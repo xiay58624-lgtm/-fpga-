@@ -1,0 +1,16 @@
+node_modules/
+__pycache__/
+*.pyc
+.env
+*.env
+cloud_secrets.h
+backend_config.json
+runtime_settings.json
+admin_auth.json
+mysql-config.json
+uploads/
+log/
+DATALOG/
+build/
+*.zip
+*.tar.gz

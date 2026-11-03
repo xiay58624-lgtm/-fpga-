@@ -1,0 +1,116 @@
+{
+  "target": "rk3568",
+  "schema": "rk3568.adas.selectable-models.v1",
+  "selection": {
+    "vehicles": 1,
+    "lines": 2,
+    "lights": 4,
+    "all": 7,
+    "supports_multiselect": true,
+    "deselect_clears_results": true
+  },
+  "preprocessing": {
+    "input_api_type": "UINT8",
+    "layout": "NHWC",
+    "shape": [
+      1,
+      640,
+      640,
+      3
+    ],
+    "color": "RGB",
+    "resize": "keep-ratio letterbox",
+    "padding": 0,
+    "normalization": "internal model /255"
+  },
+  "output": {
+    "want_float": true,
+    "layout": "[1,4+classes,8400]",
+    "scores": "probabilities; no extra sigmoid",
+    "metadata": "FP16; runtime 2.3 may mark AFFINE with zp=0, scale=1",
+    "confidence_threshold": 0.25,
+    "nms_iou": 0.4,
+    "maximum_boxes_per_model_per_source": 60
+  },
+  "models": [
+    {
+      "model_id": 0,
+      "key": "vehicles",
+      "display_name": "行人及车辆",
+      "file": "bdd7_rk3568_fp16.rknn",
+      "sha256": "7daddec0f014a32532e7fa3d32ff163bfa698fb0f31fd0ffaebc5d8ae9858b25",
+      "precision": "FP16",
+      "classes": [
+        "pedestrian",
+        "rider",
+        "car",
+        "truck",
+        "bus",
+        "motorcycle",
+        "bicycle"
+      ],
+      "output_shape": [
+        1,
+        11,
+        8400
+      ]
+    },
+    {
+      "model_id": 1,
+      "key": "lines",
+      "display_name": "交通线",
+      "file": "lane_rk3568_fp16.rknn",
+      "sha256": "ef67bfd7665656e47be948c772db61dd86f7216e1afaea39a37577a06bc0755c",
+      "precision": "FP16",
+      "classes": [
+        "center_dashline",
+        "center_solidline"
+      ],
+      "output_shape": [
+        1,
+        6,
+        8400
+      ]
+    },
+    {
+      "model_id": 2,
+      "key": "lights",
+      "display_name": "红绿灯",
+      "file": "traffic_rk3568_fp16.rknn",
+      "sha256": "e454b4afca770ce84a591ea97534aae28af389da08f8d5ddb68e9a5b7c5c33e5",
+      "precision": "FP16",
+      "classes": [
+        "Green_L_diaotou",
+        "green",
+        "green_L",
+        "green_R",
+        "green_Z_L",
+        "green_non",
+        "green_prson",
+        "green_z",
+        "red",
+        "red_L",
+        "red_L_diaotou",
+        "red_R",
+        "red_Z",
+        "red_diaotou",
+        "red_non",
+        "red_person",
+        "yellow"
+      ],
+      "output_shape": [
+        1,
+        21,
+        8400
+      ]
+    }
+  ],
+  "navigation_model": {
+    "file": "nav_video7_v4_rk3568_w8a8.rknn",
+    "classes": 12,
+    "unchanged_weights": true
+  },
+  "decision_source": 4,
+  "traffic_line_limitations": "Only dash and solid are classes; no boundary class in this lane weight.",
+  "capture_driver_fpga_unchanged": true
+}

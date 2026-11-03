@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.10)
+project(AdasContractsTests LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+enable_testing()
+add_executable(adas_contract_tests AdasContractsTests.cpp)
+target_include_directories(adas_contract_tests PRIVATE ../inc)
+add_test(NAME adas_contracts COMMAND adas_contract_tests)

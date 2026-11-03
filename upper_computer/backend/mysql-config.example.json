@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "host": "127.0.0.1",
+  "port": 3306,
+  "user": "rk3568",
+  "password": "change-me",
+  "database": "rk3568_http",
+  "connectionLimit": 5
+}

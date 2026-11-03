@@ -1,0 +1,16 @@
+{
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js",
+    "test:adas": "node ../tests/adas-policy.test.js && node ../tests/wifi-car-bridge.test.js && node ../tests/adas-status.test.js"
+  },
+  "dependencies": {
+    "@andresaya/edge-tts": "^1.8.0",
+    "mysql2": "^3.22.5",
+    "ws": "^8.18.3"
+  }
+}

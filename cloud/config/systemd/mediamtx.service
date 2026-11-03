@@ -1,0 +1,19 @@
+[Unit]
+Description=MediaMTX low-latency ADAS relay
+After=network.target
+
+[Service]
+Type=simple
+User=mediamtx
+Group=mediamtx
+EnvironmentFile=/etc/mediamtx.env
+ExecStart=/usr/local/bin/mediamtx /etc/mediamtx.yml
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,453 @@
+{
+  "snapshot_time": "2026-11-03T08:41:04.630702+00:00",
+  "host": "adas.wmnnj.top",
+  "files": [
+    {
+      "path": "upper_computer/adas-communication.js",
+      "source": "/opt/adas-upper/html/adas-communication.js",
+      "sha256": "354bf7f6e4040f853c6e079b7c9a49df4b4eae4238ebb4c8e71ceee665db3fe3",
+      "bytes": 13375
+    },
+    {
+      "path": "upper_computer/adas-policy.js",
+      "source": "/opt/adas-upper/html/adas-policy.js",
+      "sha256": "b5723f1302b19e3c9ab072622169579c022cc5d0bbbef25bfb28221a1b93b896",
+      "bytes": 2696
+    },
+    {
+      "path": "upper_computer/adas-deployment.css",
+      "source": "/opt/adas-upper/html/adas-deployment.css",
+      "sha256": "ec35c917270440f9c7c13b37a2e5537bc63191e25493c386e66e099f9c9c4042",
+      "bytes": 16052
+    },
+    {
+      "path": "upper_computer/adas.html",
+      "source": "/opt/adas-upper/html/adas.html",
+      "sha256": "c22c7b12c9f790a6d85b4e37fd3642ae2d99a81e39b0f3615b631fb06b08b931",
+      "bytes": 44215
+    },
+    {
+      "path": "upper_computer/adas-deployment-3d.js",
+      "source": "/opt/adas-upper/html/adas-deployment-3d.js",
+      "sha256": "097094880b40a9eceee2c4085a52d9a38edae37b905e9fc23058b7a6c3c0c98e",
+      "bytes": 31514
+    },
+    {
+      "path": "upper_computer/adas-webrtc.js",
+      "source": "/opt/adas-upper/html/adas-webrtc.js",
+      "sha256": "2634d348c1135e9ae50dcbd9494e4061667e569878c1a4fdcf67b867fcc81a40",
+      "bytes": 11646
+    },
+    {
+      "path": "upper_computer/adas.css",
+      "source": "/opt/adas-upper/html/adas.css",
+      "sha256": "69399d12735e5efd884af5b4b78e62dfb7477aee964751149cff150c8d8c4b28",
+      "bytes": 40310
+    },
+    {
+      "path": "upper_computer/adas-deployment.js",
+      "source": "/opt/adas-upper/html/adas-deployment.js",
+      "sha256": "053312646071ce01bc5fbfca09463e33d670aa4018c39079228cb473a7966ba0",
+      "bytes": 11099
+    },
+    {
+      "path": "upper_computer/adas-communication.css",
+      "source": "/opt/adas-upper/html/adas-communication.css",
+      "sha256": "bcf5b5a3d85d872d9acbb4fa986360db618447d45bdefa8d3404e01eecacbf9a",
+      "bytes": 5287
+    },
+    {
+      "path": "upper_computer/adas-fusion.js",
+      "source": "/opt/adas-upper/html/adas-fusion.js",
+      "sha256": "0dfeaef0eef1d87178266d1360cba7fa7ab0f11ae0e4e02e71a0e80659a14505",
+      "bytes": 19848
+    },
+    {
+      "path": "upper_computer/adas-detections.js",
+      "source": "/opt/adas-upper/html/adas-detections.js",
+      "sha256": "c15e00629ebe6dbcae1d33b365f5b1179ece447e4af59ab53aef7b62b7ee14a2",
+      "bytes": 13427
+    },
+    {
+      "path": "upper_computer/adas.js",
+      "source": "/opt/adas-upper/html/adas.js",
+      "sha256": "d77543a7568887abe8f31dd7e8de2c8d0276765adf427485d0828a93b33a0a11",
+      "bytes": 97366
+    },
+    {
+      "path": "upper_computer/adas-detections.css",
+      "source": "/opt/adas-upper/html/adas-detections.css",
+      "sha256": "a4cf18c3c90236d11e7a564e5dbd53964b73721a92fcae3a5c487d97a8a9d59a",
+      "bytes": 6477
+    },
+    {
+      "path": "upper_computer/assets/deployment/wifi-car-top-actual.webp",
+      "source": "/opt/adas-upper/html/assets/deployment/wifi-car-top-actual.webp",
+      "sha256": "17f57037c5f8ecc357f14cbbfb5884b82a837d80156010eca4dbc14472504b4c",
+      "bytes": 169160
+    },
+    {
+      "path": "upper_computer/assets/deployment/secondary-adapter-back.webp",
+      "source": "/opt/adas-upper/html/assets/deployment/secondary-adapter-back.webp",
+      "sha256": "6822cddb55f10622e23f5e177cc00f3eabd488d7a188aa2381ac0d13ed8773d3",
+      "bytes": 17956
+    },
+    {
+      "path": "upper_computer/assets/deployment/fmc-adapter-front.jpg",
+      "source": "/opt/adas-upper/html/assets/deployment/fmc-adapter-front.jpg",
+      "sha256": "f1754ead6c1c1c64dea0128de1e5ec64497698602681e9bd577e8e1358f1f290",
+      "bytes": 75239
+    },
+    {
+      "path": "upper_computer/assets/deployment/pg2l100h-surface.webp",
+      "source": "/opt/adas-upper/html/assets/deployment/pg2l100h-surface.webp",
+      "sha256": "346c777d28d5b7a9c66b5fe7ae0f8f15e512b69344209b8552ebfb6420990cf1",
+      "bytes": 184084
+    },
+    {
+      "path": "upper_computer/assets/deployment/secondary-adapter-back.jpg",
+      "source": "/opt/adas-upper/html/assets/deployment/secondary-adapter-back.jpg",
+      "sha256": "180a12a0b6422325bb8685f66b49eed9bf392a70bfe5d75b0aabf285aac31a57",
+      "bytes": 58069
+    },
+    {
+      "path": "upper_computer/assets/deployment/fmc-adapter-front.webp",
+      "source": "/opt/adas-upper/html/assets/deployment/fmc-adapter-front.webp",
+      "sha256": "0042f12664246913ae1e16ea433354e2bbbf539e1b5d0d4d5f202639f187cb5a",
+      "bytes": 44074
+    },
+    {
+      "path": "upper_computer/assets/deployment/pg2l100h-labeled.png",
+      "source": "/opt/adas-upper/html/assets/deployment/pg2l100h-labeled.png",
+      "sha256": "77cef43b234f0b6c714bc4f9cdea320a054b288440e2ada7cd86459b30c123fc",
+      "bytes": 938080
+    },
+    {
+      "path": "upper_computer/assets/deployment/fmc-adapter-back.webp",
+      "source": "/opt/adas-upper/html/assets/deployment/fmc-adapter-back.webp",
+      "sha256": "8ef64a4df7153b425be1fe8ff0ad565e938709eb73409d4b77b2bb8761ef7f2c",
+      "bytes": 68836
+    },
+    {
+      "path": "upper_computer/assets/deployment/wifi-car-side-actual.webp",
+      "source": "/opt/adas-upper/html/assets/deployment/wifi-car-side-actual.webp",
+      "sha256": "04d0423b7c1701127e1dbcda941f97f02cdb4be7ad9a33ec29ccbee043548697",
+      "bytes": 166084
+    },
+    {
+      "path": "upper_computer/assets/deployment/pg2l100h.jpg",
+      "source": "/opt/adas-upper/html/assets/deployment/pg2l100h.jpg",
+      "sha256": "c368754debdce41586dad2b04fa5d39a1dbf750b84c59d4ed31fde42c9044e97",
+      "bytes": 321984
+    },
+    {
+      "path": "upper_computer/assets/deployment/fmc-adapter-back.jpg",
+      "source": "/opt/adas-upper/html/assets/deployment/fmc-adapter-back.jpg",
+      "sha256": "4a5a099ec71dcd9b8af6a067ecde98c224026862fd28d82156a04a36c92e804a",
+      "bytes": 7131418
+    },
+    {
+      "path": "upper_computer/assets/deployment/secondary-adapter-front.jpg",
+      "source": "/opt/adas-upper/html/assets/deployment/secondary-adapter-front.jpg",
+      "sha256": "ef5e4ded15d077e32f4432727e791dd687a2328d7e2664b7b6f6dd518dcb61b2",
+      "bytes": 73058
+    },
+    {
+      "path": "upper_computer/assets/deployment/upper-screen.jpg",
+      "source": "/opt/adas-upper/html/assets/deployment/upper-screen.jpg",
+      "sha256": "b4e938ca47122321f7571b71587f3782caa21844c276804fca48b2dfad3b02f5",
+      "bytes": 406089
+    },
+    {
+      "path": "upper_computer/assets/deployment/wifi-car.jpg",
+      "source": "/opt/adas-upper/html/assets/deployment/wifi-car.jpg",
+      "sha256": "20f241d6024cdbc669de6cfc811438af8ab1ee414836317e14445304624c1cf6",
+      "bytes": 1117299
+    },
+    {
+      "path": "upper_computer/assets/deployment/rk-display.jpg",
+      "source": "/opt/adas-upper/html/assets/deployment/rk-display.jpg",
+      "sha256": "b4e938ca47122321f7571b71587f3782caa21844c276804fca48b2dfad3b02f5",
+      "bytes": 406089
+    },
+    {
+      "path": "upper_computer/assets/deployment/dual-ov5640-surface.webp",
+      "source": "/opt/adas-upper/html/assets/deployment/dual-ov5640-surface.webp",
+      "sha256": "be60c782d887516b76961a99ec8bc37a030e4c2a39422929ba27eecd70ed7dc5",
+      "bytes": 77298
+    },
+    {
+      "path": "upper_computer/assets/deployment/dual-ov5640.png",
+      "source": "/opt/adas-upper/html/assets/deployment/dual-ov5640.png",
+      "sha256": "467de53de162142a88fda35ad809690bfbce434afd243e4a0ffa16a9e0bbbd72",
+      "bytes": 434835
+    },
+    {
+      "path": "upper_computer/assets/deployment/secondary-adapter-front.webp",
+      "source": "/opt/adas-upper/html/assets/deployment/secondary-adapter-front.webp",
+      "sha256": "8bfca656e5b06931021d3bdbbbb860079a6eeffd9d62158eb5777a097bdfa750",
+      "bytes": 31150
+    },
+    {
+      "path": "upper_computer/assets/deployment/camera-rig.jpg",
+      "source": "/opt/adas-upper/html/assets/deployment/camera-rig.jpg",
+      "sha256": "0f81b977ff8fc3e8289d0e51573457761e385c7c6703802396244f2e702d63e9",
+      "bytes": 390137
+    },
+    {
+      "path": "upper_computer/assets/deployment/three.module.js",
+      "source": "/opt/adas-upper/html/assets/deployment/three.module.js",
+      "sha256": "e7348ab8c7bf7a41f7afc5fe503c20a0ed090d9536aacf1ee975d7aaee24d394",
+      "bytes": 1280747
+    },
+    {
+      "path": "upper_computer/assets/deployment/secondary-adapter.png",
+      "source": "/opt/adas-upper/html/assets/deployment/secondary-adapter.png",
+      "sha256": "a9a5b5d1ac10816cf94b18843fcdcf5bb4b0a0026f068b18a787d97197a2d9e1",
+      "bytes": 193234
+    },
+    {
+      "path": "upper_computer/assets/deployment/assembly-installed.png",
+      "source": "/opt/adas-upper/html/assets/deployment/assembly-installed.png",
+      "sha256": "4a2d541d379f3d66fb5c325536f905a37e55f382f04f6632537b49345382a02d",
+      "bytes": 1433082
+    },
+    {
+      "path": "upper_computer/assets/deployment/addons/renderers/CSS2DRenderer.js",
+      "source": "/opt/adas-upper/html/assets/deployment/addons/renderers/CSS2DRenderer.js",
+      "sha256": "cd1a4073f419018fd7ac61f79b15bf74ec62e3e845df4abad1f1ea16b1a7a5ec",
+      "bytes": 4425
+    },
+    {
+      "path": "upper_computer/assets/deployment/addons/controls/OrbitControls.js",
+      "source": "/opt/adas-upper/html/assets/deployment/addons/controls/OrbitControls.js",
+      "sha256": "1f558dec779e241f1affeec2640f53431d035d71f6d26cb523f63167c6825939",
+      "bytes": 31608
+    },
+    {
+      "path": "upper_computer/demo_assets/traffic-green-turn.jpg",
+      "source": "/opt/adas-upper/html/demo_assets/traffic-green-turn.jpg",
+      "sha256": "81b163fc2d703f527265eb3cbe42e034158413655d53557f8241ecb87f989c12",
+      "bytes": 48397
+    },
+    {
+      "path": "upper_computer/demo_assets/bdd-road-scene.jpg",
+      "source": "/opt/adas-upper/html/demo_assets/bdd-road-scene.jpg",
+      "sha256": "b7e466669c949c18621b38049439af248cd2312427ed5d56de7660582b68983d",
+      "bytes": 175280
+    },
+    {
+      "path": "upper_computer/demo_assets/lane-solid.jpg",
+      "source": "/opt/adas-upper/html/demo_assets/lane-solid.jpg",
+      "sha256": "756221b62ba47419780f70192b00b59c42d94125d0501133d15917f6afcd1e73",
+      "bytes": 54529
+    },
+    {
+      "path": "upper_computer/demo_assets/lane-dashed-2.jpg",
+      "source": "/opt/adas-upper/html/demo_assets/lane-dashed-2.jpg",
+      "sha256": "a89cefa824c69b24bbc560127d5a643d91085d182e842ccb817a9b2252fb97bc",
+      "bytes": 39414
+    },
+    {
+      "path": "upper_computer/demo_assets/traffic-green-blur.jpg",
+      "source": "/opt/adas-upper/html/demo_assets/traffic-green-blur.jpg",
+      "sha256": "b8d4cd9da5a643f341cd91150f15972ece4169b48db318e6d293bb601b010d00",
+      "bytes": 50890
+    },
+    {
+      "path": "upper_computer/demo_assets/lane-dashed.jpg",
+      "source": "/opt/adas-upper/html/demo_assets/lane-dashed.jpg",
+      "sha256": "8a99b21a2cdda207a8598e3db4b5539c04a59057e81d8f1371402bbb5b3fdcf4",
+      "bytes": 67218
+    },
+    {
+      "path": "upper_computer/demo_assets/lane-mixed.jpg",
+      "source": "/opt/adas-upper/html/demo_assets/lane-mixed.jpg",
+      "sha256": "4fa9371a9f9990b1c5c1f9602b6ef4c258fd0bdd71cbfbd981ddb2c184bdb428",
+      "bytes": 90412
+    },
+    {
+      "path": "upper_computer/demo_assets/traffic-green.jpg",
+      "source": "/opt/adas-upper/html/demo_assets/traffic-green.jpg",
+      "sha256": "45b43caa6c114ffef618b18566bdd270fc5948740741c87c486396d2ce5823c5",
+      "bytes": 134266
+    },
+    {
+      "path": "upper_computer/demo_assets/traffic-red.jpg",
+      "source": "/opt/adas-upper/html/demo_assets/traffic-red.jpg",
+      "sha256": "d902c6c10c81bd7c3c083cd7f40ec781f7e34ed8e8b696efc9cfad1fb28d43e1",
+      "bytes": 113284
+    },
+    {
+      "path": "upper_computer/tests/detection-report.test.js",
+      "source": "/opt/adas-upper/html/tests/detection-report.test.js",
+      "sha256": "d2dd586d81375ac63220d46c0cb5600973dae7c261ddf27b1887d5807757b14c",
+      "bytes": 1590
+    },
+    {
+      "path": "upper_computer/tests/adas-status.test.js",
+      "source": "/opt/adas-upper/html/tests/adas-status.test.js",
+      "sha256": "55e4f73a2ab9339522a3294daa12d38f81bcab7e8018f099af71a93044b07963",
+      "bytes": 7731
+    },
+    {
+      "path": "upper_computer/tests/adas-ui-change.test.js",
+      "source": "/opt/adas-upper/html/tests/adas-ui-change.test.js",
+      "sha256": "d1299b69ac6b576c37e37c20bb0926c7d3ca1673d335759ff1edb6b0640a6f6c",
+      "bytes": 9829
+    },
+    {
+      "path": "upper_computer/tests/adas-policy.test.js",
+      "source": "/opt/adas-upper/html/tests/adas-policy.test.js",
+      "sha256": "d6c7caf723ec404fcc5816ac7e187d048602a5e0bcb3d17dd97532459998551a",
+      "bytes": 4286
+    },
+    {
+      "path": "upper_computer/tests/wifi-car-bridge.test.js",
+      "source": "/opt/adas-upper/html/tests/wifi-car-bridge.test.js",
+      "sha256": "1a25f066627bf2b321491432fab5d9275cb3b27118e33b31761a56d6c781f942",
+      "bytes": 3094
+    },
+    {
+      "path": "upper_computer/backend/wifi-car-ws-bridge.js",
+      "source": "/opt/adas-upper/html/backend/wifi-car-ws-bridge.js",
+      "sha256": "b00217bcc7f342052678bdea87384fb35b1a3554c67d60a20b6d4b82a08b1ab1",
+      "bytes": 8236
+    },
+    {
+      "path": "upper_computer/backend/server.js",
+      "source": "/opt/adas-upper/html/backend/server.js",
+      "sha256": "23ae7ed92a589fe74be4cd5c20c563947b64e21250302283a2cc39a928d25fec",
+      "bytes": 775666
+    },
+    {
+      "path": "upper_computer/backend/package-lock.json",
+      "source": "/opt/adas-upper/html/backend/package-lock.json",
+      "sha256": "ec898f193e9345fa0b66e05d672d52d6fd5e6350470aecc1307be2e436f887c3",
+      "bytes": 8537
+    },
+    {
+      "path": "upper_computer/backend/rk-vision-command.js",
+      "source": "/opt/adas-upper/html/backend/rk-vision-command.js",
+      "sha256": "418565f05d82483990a9301557ddc8a05a0b93f2c43995e158dd63d8210bc44d",
+      "bytes": 2797
+    },
+    {
+      "path": "upper_computer/backend/mysql-config.example.json",
+      "source": "/opt/adas-upper/html/backend/mysql-config.example.json",
+      "sha256": "8221b0990baaf1c73103e3dbe2586d2ed8b064f64dc1a1f1551b63bcb714a047",
+      "bytes": 161
+    },
+    {
+      "path": "upper_computer/backend/communication-log.js",
+      "source": "/opt/adas-upper/html/backend/communication-log.js",
+      "sha256": "fb858a0dd7c4ec4b5cf3961fd0f51e0e6c9d6e385260cb334a9aa33bdf81f78b",
+      "bytes": 5292
+    },
+    {
+      "path": "upper_computer/backend/detection-report.js",
+      "source": "/opt/adas-upper/html/backend/detection-report.js",
+      "sha256": "aab537479137d454359c23ce5153d4f9bfac2e02ceb447ff871533a1e185a8d3",
+      "bytes": 3502
+    },
+    {
+      "path": "upper_computer/backend/rk-command-loop.js",
+      "source": "/opt/adas-upper/html/backend/rk-command-loop.js",
+      "sha256": "c389a262165fa2402862a562b5028c1559e45e6626b73bce75b3fb2e89c51bed",
+      "bytes": 3291
+    },
+    {
+      "path": "upper_computer/backend/wifi-car-bridge.js",
+      "source": "/opt/adas-upper/html/backend/wifi-car-bridge.js",
+      "sha256": "5682808dff345944d86cad6cf55147ad635c6818e1357041ebcaf5aa1b005e7f",
+      "bytes": 9004
+    },
+    {
+      "path": "upper_computer/backend/package.json",
+      "source": "/opt/adas-upper/html/backend/package.json",
+      "sha256": "8e5a5dfe0f6c476da7380f709ef08746122fc319cbadda39e844b6f8ba1c3800",
+      "bytes": 389
+    },
+    {
+      "path": "cloud/relay/app.py",
+      "source": "/opt/adas-relay/app.py",
+      "sha256": "839dc9a136e3eb00797c87c63fe0aab47ec7470144c611717ed9aae707b3a24b",
+      "bytes": 3210
+    },
+    {
+      "path": "cloud/relay/requirements.txt",
+      "source": "/opt/adas-relay/requirements.txt",
+      "sha256": "17c9826ae269529d65727d62aabfa54f0eee7f733c3e2f0beff61026dedb9ef2",
+      "bytes": 44
+    },
+    {
+      "path": "cloud/config/systemd/adas-upper.service",
+      "source": "/etc/systemd/system/adas-upper.service",
+      "sha256": "8c376e11467fe26b446a2cd88ec42fa2a646fdde3a86df7999d865fcf1b35f89",
+      "bytes": 457
+    },
+    {
+      "path": "cloud/config/systemd/adas-relay.service",
+      "source": "/etc/systemd/system/adas-relay.service",
+      "sha256": "ac65a84693959f5071d254391f901a397cf1a1f31f1fd57afae65bcb6dba8330",
+      "bytes": 423
+    },
+    {
+      "path": "cloud/config/systemd/mediamtx.service",
+      "source": "/etc/systemd/system/mediamtx.service",
+      "sha256": "96a76a5e51f6469f06964b580df773562270080dbe07d8caac6ea9a0251089e3",
+      "bytes": 355
+    },
+    {
+      "path": "cloud/config/nginx/adas-upper-http.conf",
+      "source": "/etc/nginx/sites-enabled/adas-upper-http.conf",
+      "sha256": "9d9780db050f32a3e7cce78b1d5c76643273b221c593b00d20f31f2a8538c505",
+      "bytes": 295
+    },
+    {
+      "path": "cloud/config/nginx/adas-upper-https.conf",
+      "source": "/etc/nginx/sites-enabled/adas-upper-https.conf",
+      "sha256": "8db1e21beb7c5927f017ffc5747714d00ca5105028862a1236d03c4053227c5d",
+      "bytes": 1385
+    },
+    {
+      "path": "cloud/config/nginx/adas-relay",
+      "source": "/etc/nginx/sites-enabled/adas-relay",
+      "sha256": "38a094622883022a6fe23011ae926d4927b58f3d93fb0d2dda49da55d1e7785e",
+      "bytes": 988
+    },
+    {
+      "path": "cloud/config/mediamtx.yml.example",
+      "source": "/etc/mediamtx.yml",
+      "sha256": "feacdc2a86fda48f8690f7c13dc5cd69d5f249f5ffe8e5ff8b1023e83243ae0d",
+      "bytes": 800
+    },
+    {
+      "path": "cloud/config/env/adas-upper.env.example",
+      "source": "/etc/adas-upper.env",
+      "sha256": "72f5390d534813610ad56a191cf1cec548f649d4e8fc9b3c42fea43b0ea5f563",
+      "bytes": 195
+    },
+    {
+      "path": "cloud/config/env/adas-relay.env.example",
+      "source": "/etc/adas-relay.env",
+      "sha256": "ad57e0b8021a3e3070b4e27ba3b0f0fe4f9441ad5a6d4106d030dbe13a4abb88",
+      "bytes": 168
+    },
+    {
+      "path": "cloud/config/env/mediamtx.env.example",
+      "source": "/etc/mediamtx.env",
+      "sha256": "09950492d9558133ef321137f375f3a287a908c4c7554bef87eeb751790a8743",
+      "bytes": 205
+    }
+  ],
+  "missing_configs": [],
+  "services": {
+    "adas-upper": "active",
+    "adas-relay": "active",
+    "mediamtx": "active",
+    "nginx": "active"
+  },
+  "node_version": "v20.20.2",
+  "mediamtx_version": "v1.21.2"
+}
